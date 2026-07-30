@@ -40,6 +40,28 @@ cd ~/dotfiles
   `automatically_reload_config = true` なので反映自体は自動。
 - 既存ファイルは install 実行時に `*.bak` へ退避するので安全。
 
+## bin/bwsx（Bitwarden Secrets Manager）
+
+API キー類を `.env` や `~/.zshenv` に常駐させず、必要なコマンドの実行時だけ環境変数として注入する。
+
+```bash
+bwsx run -- 'コマンド'   # マシンアカウントが読めるシークレットを注入して実行
+bwsx project list        # 素の bws サブコマンドも通る
+```
+
+- 注入されたシークレットは子プロセスの環境変数になる。信頼できるコマンドにだけ渡す。シークレット名をそのまま変数名にしたくない場合は `bws run --uuids-as-keynames` で UUID 由来の名前にできる。
+- `bws` 本体は同梱していない。<https://github.com/bitwarden/sdk-sm/releases> から各アーキテクチャ用を `~/.local/bin/bws` に置く。
+- アクセストークンの置き場所は OS ごとに変わる。未登録なら `bwsx` が登録コマンドを表示する。
+
+| 環境 | 保管先 | 登録方法 |
+|------|--------|----------|
+| mac | login keychain | `security add-generic-password -a "$USER" -s bws_token -U -w` |
+| WSL | Windows 資格情報マネージャー (PasswordVault) | `bin/bws-store.ps1` を powershell.exe で実行 |
+| linux | `~/.config/bws/token` (600) | ファイルに書く（平文なので端末の性質を見て判断） |
+
+- トークンは端末ごとに別々に発行する。端末を手放したらその1本だけ revoke すればよい。
+- 有効期限切れで `bwsx` が失敗したら、Web で再発行して同じ手順で上書きする。
+
 ## 依存ツール（install.sh が自動導入）
 
 - **starship**: プロンプト。mac は brew、linux/WSL は公式インストーラで導入し、

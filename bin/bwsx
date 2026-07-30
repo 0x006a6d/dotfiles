@@ -1,0 +1,50 @@
+#!/bin/sh
+# Bitwarden Secrets Manager wrapper.
+# Fetches the access token from the platform's credential store, then runs bws.
+#   bwsx run -- 'command'   secrets injected as environment variables
+#   bwsx project list       plain bws subcommands
+set -eu
+
+BWS="${BWS_BIN:-$HOME/.local/bin/bws}"
+[ -x "$BWS" ] || BWS="$(command -v bws 2>/dev/null || true)"
+if [ -z "$BWS" ]; then
+	echo "bwsx: bws not found. Get it from https://github.com/bitwarden/sdk-sm/releases" >&2
+	exit 127
+fi
+
+case "$(uname -s)" in
+Darwin) OS=mac ;;
+Linux)
+	if grep -qi microsoft /proc/version 2>/dev/null; then OS=wsl; else OS=linux; fi
+	;;
+*) OS=other ;;
+esac
+
+PS_VAULT="[void][Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]"
+TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/bws/token"
+
+case "$OS" in
+mac)
+	token="$(security find-generic-password -a "$USER" -s bws_token -w 2>/dev/null || true)"
+	store="security add-generic-password -a \"\$USER\" -s bws_token -U -w"
+	;;
+wsl)
+	token="$(powershell.exe -NoProfile -NonInteractive -Command \
+		"$PS_VAULT; (New-Object Windows.Security.Credentials.PasswordVault).Retrieve('bws','token').Password" \
+		2>/dev/null | tr -d '\r\n' || true)"
+	store="powershell.exe -NoProfile -File \"\$(wslpath -w \"\$HOME/dotfiles/bin/bws-store.ps1\")\""
+	;;
+*)
+	token="$(cat "$TOKEN_FILE" 2>/dev/null || true)"
+	store="mkdir -p \"$(dirname "$TOKEN_FILE")\" && touch \"$TOKEN_FILE\" && chmod 600 \"$TOKEN_FILE\" && cat > \"$TOKEN_FILE\"   # paste token, then Ctrl-D"
+	;;
+esac
+
+if [ -z "$token" ]; then
+	echo "bwsx: no access token stored. To store it:" >&2
+	echo "  $store" >&2
+	exit 1
+fi
+
+export BWS_ACCESS_TOKEN="$token"
+exec "$BWS" "$@"
