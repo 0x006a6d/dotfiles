@@ -79,8 +79,8 @@ if command -v delta >/dev/null 2>&1; then
   echo "skip:   git-delta は既に導入済み ($(delta --version))"
 else
   case "$OS" in
-    wsl|linux) sudo apt-get install -y git-delta ;;
-    mac)       brew install git-delta ;;
+    wsl|linux) sudo apt-get install -y git-delta || echo "warn:   git-delta 導入失敗（後続は継続）" ;;
+    mac)       brew install git-delta || echo "warn:   git-delta 導入失敗（後続は継続）" ;;
     *)         echo "skip:   未対応OSのため git-delta はスキップ" ;;
   esac
 fi
@@ -90,8 +90,13 @@ if command -v starship >/dev/null 2>&1; then
   echo "skip:   starship は既に導入済み ($(starship --version | head -1))"
 else
   case "$OS" in
-    mac)       brew install starship ;;
-    wsl|linux) curl -sS https://starship.rs/install.sh | sh -s -- -y ;;
+    mac)       brew install starship || echo "warn:   starship 導入失敗（後続は継続）" ;;
+    wsl|linux)
+      # 既定の /usr/local/bin は sudo が要る（この箱は sudo 不可）ため
+      # -b で ~/.local/bin に入れる。~/.local/bin は既に PATH に入っている想定。
+      mkdir -p "$HOME/.local/bin"
+      curl -sS https://starship.rs/install.sh | sh -s -- -y -b "$HOME/.local/bin" \
+        || echo "warn:   starship 導入失敗（後続は継続）" ;;
     *)         echo "skip:   未対応OSのため starship はスキップ" ;;
   esac
 fi
