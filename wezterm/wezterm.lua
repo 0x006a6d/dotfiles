@@ -9,6 +9,12 @@ local is_linux = not is_windows and not is_mac
 
 config.automatically_reload_config = true
 
+-- Windows では起動時に PowerShell ではなく WSL (bash ログインシェル) を開く
+-- `~` でホームディレクトリ起動、`-- bash -l` でログインシェルにする
+if is_windows then
+  config.default_prog = { "wsl.exe", "~", "--", "bash", "-l" }
+end
+
 -- 起動時のウィンドウサイズ（列×行）少しだけ大きめに
 config.initial_cols = 120
 config.initial_rows = 32
