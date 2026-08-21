@@ -2,7 +2,7 @@
   "env": {
     "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
   },
-  "model": "claude-fable-5[1m]",
+  "model": "opus[1m]",
   "hooks": {
     "SessionEnd": [
       {
@@ -20,6 +20,18 @@
           {
             "type": "command",
             "command": "\"$HOME/claude-config/hooks/session_start.sh\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/.claude/hooks/bash-guard.sh\"",
+            "timeout": 20
           }
         ]
       }
@@ -52,5 +64,6 @@
   },
   "tui": "fullscreen",
   "autoMemoryEnabled": false,
-  "skipDangerousModePermissionPrompt": true
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark"
 }

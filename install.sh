@@ -35,6 +35,9 @@ link "$DOTFILES/tmux/.tmux.conf" "$HOME/.tmux.conf"
 link "$DOTFILES/claude/keybindings.json" "$HOME/.claude/keybindings.json"
 link "$DOTFILES/claude/settings.json"    "$HOME/.claude/settings.json"
 link "$DOTFILES/claude/scripts"          "$HOME/.claude/scripts"
+# hooks は settings.json の PreToolUse から絶対パスで呼ばれる。
+# ここで貼らないと hook がファイル不在で失敗する (fail-open にはしない方針)
+link "$DOTFILES/claude/hooks"            "$HOME/.claude/hooks"
 
 # --- mac: Karabiner はGUIが設定ファイルを書き換えるためディレクトリごと symlink ---
 if [ "$OS" = mac ]; then

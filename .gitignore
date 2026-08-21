@@ -27,3 +27,6 @@ desktop.ini            # Windows
 .bash_history
 .lesshst
 .python_history
+
+# hooks_apply が作る settings のバックアップ
+claude/settings.json.bak-*
