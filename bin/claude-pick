@@ -2,7 +2,8 @@
 # claude セッションピッカー
 # WezTerm の LEADER+g から呼ばれる。既存の tmux セッション一覧を出し、
 # 選べば attach、[新規] を選べば新しいセッションで claude を起動する。
-CLAUDE_CMD='export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; claude --dangerously-skip-permissions; exec "$SHELL" -l'
+# stty susp undef: Ctrl+Z で SIGTSTP が飛ばないようにする (claude 内では undo に割当)
+CLAUDE_CMD='export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; stty susp undef; claude --dangerously-skip-permissions; exec "$SHELL" -l'
 
 # 既存セッション一覧（新しい順）
 sessions=()
