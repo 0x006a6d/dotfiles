@@ -78,6 +78,13 @@ set_key "$WM" switch-windows-backward      "['<Shift><Alt>Tab']"
 # Win+Tab でタスクビュー。Windows にアプリ単位の切替は無いので Super+Tab を明け渡す
 set_key "$SHELL_KB" toggle-overview        "['<Super>Tab']"
 
+# switch-group（同一アプリ内のウィンドウ巡回。Windows には無い概念）は
+# Above_Tab を握っている。Above_Tab は「Tab の上のキー」の意味で US 配列では
+# grave と同じ物理キーなので、Alt+` を IME に使うには Alt 側を外す必要がある。
+# 表記が違うだけで同じキーなので、文字列一致の衝突確認では見落とす
+set_key "$WM" switch-group                 "['<Super>Above_Tab']"
+set_key "$WM" switch-group-backward        "['<Shift><Super>Above_Tab']"
+
 # Alt+` で IME(mozc) トグル。karabiner の「Cmd+` で IME 切替」と同じ指の位置
 set_key "$WM" switch-input-source          "['<Alt>grave']"
 set_key "$WM" switch-input-source-backward "['<Shift><Alt>grave']"
