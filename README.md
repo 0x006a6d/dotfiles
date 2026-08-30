@@ -36,6 +36,7 @@ cd ~/dotfiles
 | claude | symlink (`~/.claude/settings.json`, `scripts/`, `keybindings.json`) | symlink |
 | wezterm | symlink (`~/.config/wezterm/`) | **コピー** (`/mnt/c/Users/<user>/.config/wezterm/`) |
 | gnome | linux のみ `gsettings` を直接書き換え | 対象外 |
+| HackGen | `~/.local/share/fonts` / mac は `~/Library/Fonts` | **Windows側** + レジストリ登録 |
 
 - **tmux** はsymlinkなので、`~/dotfiles/` の中を編集すれば即反映。
 - **WSLのwezterm** はWindowsアプリでWSLのsymlinkを辿れないため `install.sh` でコピー配置。
@@ -101,8 +102,13 @@ bwsx project list        # 素の bws サブコマンドも通る
 - **starship**: プロンプト。mac は brew、linux/WSL は公式インストーラで導入し、
   zsh は `~/.zshrc` に init を追記、bash は `bash/starship.sh` 経由で有効化。
 - **git-delta**: git の差分ビューア。
-- **Nerd Font**: starship / wezterm の設定がグリフ（  󰌾 など）を使うため必須。
-  wezterm 側は HackGen Console NF を指定している（フォント自体の導入は手動）。
+- **HackGen Console NF**: starship / wezterm の設定がグリフ（  󰌾 など）を使うため必須。
+  公式リリース（yuru7/HackGen）から版を固定して取得する。リポジトリには実体を置かない
+  （OFL 1.1 なので同梱再配布もできるが、LICENSE 同梱の義務が生じるうえ 4本で 50MB を超えるため）。
+  配置先は OS ごとに違い、WSL では WezTerm が Windows アプリなので Windows 側へ入れる。
+  Windows はファイルを置くだけでは認識しないので `reg.exe` で
+  `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Fonts` にも登録する。
+  linux は `fc-cache -f`、mac は追加処理なし。4本とも揃っていれば何もしない。
 
 ## 注意
 
