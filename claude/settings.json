@@ -63,6 +63,7 @@
     }
   },
   "tui": "fullscreen",
+  "agentPushNotifEnabled": true,
   "autoMemoryEnabled": false,
   "skipDangerousModePermissionPrompt": true,
   "theme": "dark"
