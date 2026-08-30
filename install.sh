@@ -122,6 +122,12 @@ else
   echo "append: starship init を ~/.zshrc に追記"
 fi
 
+# --- linux: GNOME のキーバインドを Windows 風に揃える ---
+# mac の karabiner に相当するもの。WSL は Windows 側が本体なので対象外。
+if [ "$OS" = linux ]; then
+  "$DOTFILES/gnome/win-like.sh"
+fi
+
 # --- wezterm: 環境ごとに配置方法を変える ---
 case "$OS" in
   mac|linux)
