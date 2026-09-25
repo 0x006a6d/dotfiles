@@ -47,6 +47,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/claude-config/hooks/completion_gate.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
@@ -58,7 +69,8 @@
     "claude-guardrails@0x006a6d": true,
     "codex@openai-codex": true,
     "frontend-design@claude-plugins-official": true,
-    "swift-lsp@claude-plugins-official": true
+    "swift-lsp@claude-plugins-official": true,
+    "makerskills@makerskills": true
   },
   "extraKnownMarketplaces": {
     "0x006a6d": {
@@ -72,11 +84,18 @@
         "source": "github",
         "repo": "openai/codex-plugin-cc"
       }
+    },
+    "makerskills": {
+      "source": {
+        "source": "github",
+        "repo": "coreyhaines31/makerskills"
+      }
     }
   },
   "tui": "fullscreen",
-  "agentPushNotifEnabled": true,
   "autoMemoryEnabled": false,
   "skipDangerousModePermissionPrompt": true,
-  "theme": "dark"
+  "theme": "dark",
+  "switchModelsOnFlag": true,
+  "agentPushNotifEnabled": true
 }
