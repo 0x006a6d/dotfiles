@@ -42,7 +42,6 @@
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(git *)",
             "command": "python3 \"$HOME/claude-config/hooks/board_after_push.py\"",
             "timeout": 20
           }
