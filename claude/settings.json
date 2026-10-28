@@ -2,7 +2,7 @@
   "env": {
     "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"
   },
-  "model": "opus[1m]",
+  "model": "opus",
   "hooks": {
     "SessionEnd": [
       {
@@ -34,6 +34,26 @@
             "timeout": 20
           }
         ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/cause-gate.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|mcp__blender__execute_blender_code",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/hooks/step-gate.py\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -54,6 +74,26 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/claude-config/hooks/completion_gate.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/claude-config/hooks/cause_gate.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/claude-config/hooks/interrupt_check.py\"",
             "timeout": 10
           }
         ]
@@ -90,6 +130,12 @@
         "source": "github",
         "repo": "coreyhaines31/makerskills"
       }
+    }
+  },
+  "language": "japanese",
+  "modelSettings": {
+    "claude-fable-5-1": {
+      "autoCompactWindow": 400000
     }
   },
   "tui": "fullscreen",
