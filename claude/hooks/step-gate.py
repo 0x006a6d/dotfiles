@@ -8,14 +8,15 @@
 #   やること: <これからやること>
 #   原文に無いこと: なし ／ <原文に書いていない作り方・モデル・分け方など>
 #   承認: <原文に無いことがあるとき、それを初めて書いた後のユーザーの発言をそのまま>
-# カード（0000_ToDo 配下）への書き込みと cause_gate.md、読むだけのコマンドは通す。
+# カード（0000_ToDo 配下）とこの会話の原因の記録（cause_gate/<session_id>.md）への書き込み、読むだけのコマンドは通す。
 # ユーザーが ~/.claude/step_gate_off を置いた間は何も止めない（このフックを直すときに使う）。
 # それ以外のとき、このフック・settings.json・step_gate_off を Claude が書き換えるのは止める。
 import json, os, re, sys, datetime
 
 HOME = os.path.expanduser("~")
 OFF = HOME + "/.claude/step_gate_off"
-FREE = ("/0000_ToDo/", HOME + "/.claude/cause_gate.md")
+FREE = ("/0000_ToDo/",)
+GATE_DIR = os.path.realpath(HOME + "/.claude/cause_gate")
 GUARD = r"(step-gate\.py|cause-gate\.py|step_gate_off|settings\.json)"
 RUNS = r"(\bpython\d?(\.\d+)?\b|(?:^|[;&|(]\s*)\S*\.py\b|godot|blender|\bffmpeg\b|\bcurl\b[^|;&]*\s(-d|--data|-X\s*POST|-F)\b|\bgit\s+(commit|push)\b)"
 WRITECMD = r"\b(cp|mv|rm|mkdir|touch|install|ln|chmod|sed\s+-i)\b"
@@ -108,8 +109,17 @@ def main():
     if tool in EDITS and re.search(GUARD, ti.get("file_path") or ""):
         block("このフック・settings.json・step_gate_off は Claude が書き換えない。")
 
+    # ほかの会話の記録を書き換えてその会話の cause-gate を通せないよう、記録はこの会話の分だけ通す
+    # session_id は cause-gate と同じく変換せずに使い、記録名に使えない ID の記録は通さない
+    sid = d.get("session_id", "")
+    gate = os.path.join(GATE_DIR, sid + ".md") if re.fullmatch(r"[A-Za-z0-9_-]+", sid) else None
+
     def free_only(paths):
-        return paths and all(any(f in p.replace("~", HOME, 1) for f in FREE) for p in paths)
+        # .. やリンクで許可した場所の外を指すパスを通さないよう、リンクをたどった先で照合する
+        def ok(p):
+            q = os.path.realpath(p.replace("~", HOME, 1))
+            return q == gate or any(f in q for f in FREE)
+        return paths and all(ok(p) for p in paths)
     if tool in EDITS:
         if free_only([ti.get("file_path") or ti.get("notebook_path") or ""]):
             sys.exit(0)

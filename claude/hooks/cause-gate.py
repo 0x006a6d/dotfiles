@@ -2,7 +2,8 @@
 # 原因を確かめる前のコード書き換えを止める PreToolUse フック。
 # コードのファイル（.py .gd .js .ts .swift .sh など）を Edit/Write するとき、
 # または Bash でそれらを書き換えるとき（sed -i、> へのリダイレクト、tee、open(..., 'w')、cp/mv の書き込み先）に、
-# ~/.claude/cause_gate.md を見て次を満たさなければ止める。
+# その会話の記録 ~/.claude/cause_gate/<session_id>.md を見て次を満たさなければ止める
+# （会話ごとに分けるのは、1 つのファイルだとほかの会話が書いた記録で通ったり止まったりするため）。
 #   - 3 時間以内に書かれている
 #   - 「mode: 修正」なら「原因:」と「直す1点:」と「card:」の行が空でなく、card のノートに今日の日付の
 #     「- YYYY-MM-DD claude:」コメントで「原因」を含む行がある
@@ -10,14 +11,14 @@
 # 止めるときは exit 2 と理由（stderr）を返す。コード以外のファイルと読み取りだけのコマンドは通す。
 import json, os, re, sys, time, datetime
 
-GATE = os.path.expanduser("~/.claude/cause_gate.md")
+GATE_DIR = os.path.expanduser("~/.claude/cause_gate")
 CODE = r"\.(py|gd|gdshader|js|mjs|ts|tsx|swift|sh|lua|c|cc|cpp|h|hpp|rs|go)\b"
 MAXAGE = 3 * 3600
 
 
-def block(msg):
+def block_with(msg, gate):
     sys.stderr.write("[cause-gate] " + msg + "\n"
-                     "コードを書き換える前に ~/.claude/cause_gate.md を書く:\n"
+                     "コードを書き換える前に、この会話の記録 " + gate + " を書く:\n"
                      "  mode: 修正\n"
                      "  card: <カードのパス>\n"
                      "  原因: <確定した原因>\n"
@@ -61,10 +62,25 @@ def main():
     t = targets(d.get("tool_name", ""), d.get("tool_input", {}) or {})
     if not t:
         sys.exit(0)
+    # session_id は変換せずに記録名にする（文字を消すと別の会話と同じ記録を指しうる）
+    sid = d.get("session_id", "")
+    GATE = os.path.join(GATE_DIR, sid + ".md")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", sid):
+        block_with("session_id が無いか、記録名に使えない文字を含む（" + sid[:40] + "）。", GATE_DIR + "/<session_id>.md")
+
+    try:
+        os.makedirs(GATE_DIR, exist_ok=True)     # 止めたときに示すパスへそのまま書けるように
+    except OSError as e:
+        block_with("記録のフォルダを作れない（" + str(e) + "）。", GATE)
+
+    def block(msg):
+        block_with(msg, GATE)
+    if os.path.islink(GATE):
+        block("この会話の原因の記録がリンクになっている（ほかの記録は使わない）。")
     if not os.path.exists(GATE):
-        block("原因の記録（cause_gate.md）がない。書き換え先: " + ", ".join(t[:3]))
+        block("この会話の原因の記録がない。書き換え先: " + ", ".join(t[:3]))
     if time.time() - os.path.getmtime(GATE) > MAXAGE:
-        block("cause_gate.md が 3 時間より古い。今の書き換えの原因を書き直す。")
+        block("この会話の原因の記録が 3 時間より古い。今の書き換えの原因を書き直す。")
     g = open(GATE, encoding="utf-8").read()
 
     def field(k):
