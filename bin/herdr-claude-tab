@@ -2,9 +2,13 @@
 # herdr に新しいタブを作り、そこで claude を起動する。
 # WezTerm の LEADER+g から呼ばれる（旧 claude-pick の置き換え）。
 # 対象は herdr の既定セッション。herdr が起動していなければ何もしない。
+# 作業フォルダは ~/work（Claude Code はホームフォルダの信頼を保存せず、毎回確認が出るため）。
 set -euo pipefail
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
 
-pane=$(herdr tab create --cwd "$HOME" --focus | jq -r '.result.root_pane.pane_id')
+mkdir -p "$HOME/work"
+pane=$(herdr tab create --cwd "$HOME/work" --focus | jq -r '.result.root_pane.pane_id')
 # stty susp undef: Ctrl+Z で SIGTSTP が飛ばないようにする (claude 内では undo に割当)
-herdr pane run "$pane" 'stty susp undef; claude --dangerously-skip-permissions'
+# claude の終了後（起動に失敗したときも）は元の端末設定に戻し、ペインのシェルで Ctrl+Z が使えるようにする
+# shellcheck disable=SC2016  # ペインのシェルで展開させるため、ここでは展開しない
+herdr pane run "$pane" '_stty=$(stty -g); stty susp undef; claude --dangerously-skip-permissions; stty "$_stty"; unset _stty'
