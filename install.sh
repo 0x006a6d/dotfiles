@@ -238,15 +238,29 @@ case "$OS" in
       cp "$DOTFILES/wezterm/wezterm.lua"  "$WIN_WEZTERM/"
       cp "$DOTFILES/wezterm/keybinds.lua" "$WIN_WEZTERM/"
       echo "copy:   wezterm -> $WIN_WEZTERM"
-      # agy (Windows 版) は agy.EXE なので bash からは拡張子なしで呼べない → リンクを貼る
-      WIN_AGY="/mnt/c/Users/${WIN_USER}/AppData/Local/agy/bin/agy.exe"
-      if [ -f "$WIN_AGY" ]; then
-        link "$WIN_AGY" "$HOME/.local/bin/agy"
-      else
-        echo "skip:   agy が未インストールのためリンクしない"
-      fi
     else
       echo "skip:   Windowsユーザーが特定できないため wezterm はスキップ"
+    fi
+
+    # agy (Windows 版) は agy.EXE なので bash からは拡張子なしで呼べない → リンクを貼る
+    # ユーザー名とプロファイルのフォルダ名は一致しないことがあるので %LOCALAPPDATA% から探す
+    WIN_LOCALAPPDATA="$(cmd.exe /c 'echo %LOCALAPPDATA%' 2>/dev/null | tr -d '\r\n')"
+    WIN_AGY=""
+    if [ -n "$WIN_LOCALAPPDATA" ] && [ "$WIN_LOCALAPPDATA" != "%LOCALAPPDATA%" ]; then
+      WIN_AGY="$(wslpath -u "$WIN_LOCALAPPDATA" 2>/dev/null)/agy/bin/agy.exe"
+    fi
+    AGY_DST="$HOME/.local/bin/agy"
+    if [ -z "$WIN_AGY" ] || [ ! -f "$WIN_AGY" ]; then
+      echo "skip:   agy が未インストールのためリンクしない"
+    elif [ -e "$AGY_DST" ] || [ -L "$AGY_DST" ]; then
+      # Linux 版 agy も同じパスに入るので、Windows 版を指すリンク以外は残す
+      if [ "$(readlink "$AGY_DST")" = "$WIN_AGY" ]; then
+        echo "skip:   $AGY_DST は既に $WIN_AGY を指している"
+      else
+        echo "skip:   $AGY_DST が既にあるので残す（Linux 版など）"
+      fi
+    else
+      link "$WIN_AGY" "$AGY_DST"
     fi
     ;;
   *)
