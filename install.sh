@@ -238,6 +238,13 @@ case "$OS" in
       cp "$DOTFILES/wezterm/wezterm.lua"  "$WIN_WEZTERM/"
       cp "$DOTFILES/wezterm/keybinds.lua" "$WIN_WEZTERM/"
       echo "copy:   wezterm -> $WIN_WEZTERM"
+      # agy (Windows 版) は agy.EXE なので bash からは拡張子なしで呼べない → リンクを貼る
+      WIN_AGY="/mnt/c/Users/${WIN_USER}/AppData/Local/agy/bin/agy.exe"
+      if [ -f "$WIN_AGY" ]; then
+        link "$WIN_AGY" "$HOME/.local/bin/agy"
+      else
+        echo "skip:   agy が未インストールのためリンクしない"
+      fi
     else
       echo "skip:   Windowsユーザーが特定できないため wezterm はスキップ"
     fi
