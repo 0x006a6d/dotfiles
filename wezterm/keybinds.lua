@@ -65,15 +65,17 @@ return {
     { key = "}", mods = "LEADER", action = act({ MoveTabRelative = 1 }) },
 
     -- claude を起動 leader + g（Windowsは WSL 経由、それ以外はネイティブ bash）
-    -- herdr に新しいタブを作り、そこで claude を起動する（WezTerm のタブは増やさない）
+    -- 起動時にセッション選択メニューを出す（既存にattach or 新規作成）
     {
       key = "g",
       mods = "LEADER",
-      action = wezterm.action_callback(function()
-        wezterm.background_child_process(is_windows
-          and { "wsl.exe", "~", "--", "bash", "-lc", "~/.local/bin/herdr-claude-tab" }
-          or { "bash", "-lc", "~/.local/bin/herdr-claude-tab" })
-      end),
+      action = is_windows
+        and act.SpawnCommandInNewTab({
+          args = { "wsl.exe", "~", "--", "bash", "-lc", "~/.local/bin/claude-pick" },
+        })
+        or act.SpawnCommandInNewTab({
+          args = { "bash", "-lc", "~/.local/bin/claude-pick" },
+        }),
     },
 
     -- 画面フルスクリーン切り替え

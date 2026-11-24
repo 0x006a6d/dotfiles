@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# claude セッションピッカー
+# WezTerm の LEADER+g から呼ばれる。既存の tmux セッション一覧を出し、
+# 選べば attach、[新規] を選べば新しいセッションで claude を起動する。
+# stty susp undef: Ctrl+Z で SIGTSTP が飛ばないようにする (claude 内では undo に割当)
+CLAUDE_CMD='export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"; stty susp undef; claude --dangerously-skip-permissions; exec "$SHELL" -l'
+
+# 既存セッション一覧（新しい順）
+sessions=()
+while IFS= read -r line; do
+  [ -n "$line" ] && sessions+=("$line")
+done < <(tmux list-sessions -F '#S' 2>/dev/null)
+
+echo "== claude セッションを選択 =="
+if ((${#sessions[@]})); then
+  printf '  既存: %s\n' "${sessions[*]}"
+fi
+echo
+
+PS3=$'\n選択 (番号): '
+options=("[新規セッション]" "${sessions[@]}" "[キャンセル]")
+select opt in "${options[@]}"; do
+  case "${opt:-}" in
+    "")
+      echo "無効な選択です。番号で入力してください。" ;;
+    "[キャンセル]")
+      exit 0 ;;
+    "[新規セッション]")
+      read -rp "新セッション名 (空欄=自動連番): " name
+      if [[ -z "${name// /}" ]]; then
+        # 空欄なら 1 から空いている最小の番号を割り当てる (1, 2, 3, ...)
+        n=1
+        while tmux has-session -t "=$n" 2>/dev/null; do ((n++)); done
+        name="$n"
+      else
+        # 明示名が既存と衝突する場合のみ連番サフィックスを付ける
+        base="$name"; n=1
+        while tmux has-session -t "=$name" 2>/dev/null; do
+          name="${base}-${n}"; ((n++))
+        done
+      fi
+      exec tmux new -s "$name" "$CLAUDE_CMD" ;;
+    *)
+      exec tmux attach -t "=$opt" ;;
+  esac
+done
