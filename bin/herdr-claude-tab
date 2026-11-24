@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# herdr に新しいタブを作り、そこで claude を起動する。
+# WezTerm の LEADER+g から呼ばれる（旧 claude-pick の置き換え）。
+# 対象は herdr の既定セッション。herdr が起動していなければ何もしない。
+set -euo pipefail
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:$PATH"
+
+pane=$(herdr tab create --cwd "$HOME" --focus | jq -r '.result.root_pane.pane_id')
+# stty susp undef: Ctrl+Z で SIGTSTP が飛ばないようにする (claude 内では undo に割当)
+herdr pane run "$pane" 'stty susp undef; claude --dangerously-skip-permissions'
