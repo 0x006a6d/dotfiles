@@ -12,6 +12,15 @@
             "command": "python3 \"$HOME/claude-config/hooks/spool_write.py\""
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -20,6 +29,15 @@
           {
             "type": "command",
             "command": "\"$HOME/claude-config/hooks/session_start.sh\""
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
           }
         ]
       }
@@ -54,6 +72,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -64,6 +91,26 @@
             "type": "command",
             "command": "python3 \"$HOME/claude-config/hooks/board_after_push.py\"",
             "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
           }
         ]
       }
@@ -86,6 +133,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -95,6 +151,15 @@
             "type": "command",
             "command": "python3 \"$HOME/claude-config/hooks/interrupt_check.py\"",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
           }
         ]
       }
@@ -135,6 +200,9 @@
   "language": "japanese",
   "modelSettings": {
     "claude-fable-5-1": {
+      "autoCompactWindow": 400000
+    },
+    "claude-fable-5-2": {
       "autoCompactWindow": 400000
     }
   },
