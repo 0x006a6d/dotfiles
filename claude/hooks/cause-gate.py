@@ -105,7 +105,13 @@ def main():
         if not os.path.isfile(card):
             block("card のノートが見つからない: " + card)
         base = d.get("cwd") or os.getcwd()
+        # cd を挟むと書き込み先の基準が cwd でなくなるので、新規かどうかを確かめられない
+        if d.get("tool_name") == "Bash" and re.search(r"(?:^|[;&|(\s])cd(?:\s|$)", (d.get("tool_input") or {}).get("command", "")):
+            block("cd を含むコマンドは書き込み先の場所が分からないので mode: 新規 では通さない。")
         for p in t:
+            # 変数・コマンド置換・グロブ・波括弧は展開しないと実際の書き込み先が分からない
+            if re.search(r"[$`*?\[{]", p):
+                block("書き込み先にシェルの展開（$ ` * ? [ {）を含むので mode: 新規 では通さない: " + p)
             if p.startswith("("):     # 書き込み先のパスが分からないものは、新規かどうかを確かめられない
                 block("書き込み先のパスが分からないので mode: 新規 では通さない。")
             if os.path.lexists(os.path.join(base, os.path.expanduser(p))):

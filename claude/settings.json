@@ -131,26 +131,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/claude-config/hooks/completion_gate.py\"",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/claude-config/hooks/cause_gate.py\"",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
-            "timeout": 5
+            "command": "\"$HOME/dotfiles/bin/claude-stop-chain\"",
+            "timeout": 30
           }
         ]
       }
