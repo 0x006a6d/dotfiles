@@ -105,9 +105,10 @@ def main():
         if not os.path.isfile(card):
             block("card のノートが見つからない: " + card)
         base = d.get("cwd") or os.getcwd()
-        # cd を挟むと書き込み先の基準が cwd でなくなるので、新規かどうかを確かめられない
-        if d.get("tool_name") == "Bash" and re.search(r"(?:^|[;&|(\s])cd(?:\s|$)", (d.get("tool_input") or {}).get("command", "")):
-            block("cd を含むコマンドは書き込み先の場所が分からないので mode: 新規 では通さない。")
+        # cd・pushd・popd を挟むと書き込み先の基準が cwd でなくなるので、新規かどうかを確かめられない
+        # （引数なしの popd は直後に ; などが続くので、区切り文字も終わりとして見る）
+        if d.get("tool_name") == "Bash" and re.search(r"(?:^|[;&|(\s])(?:cd|pushd|popd)(?:[\s;&|)]|$)", (d.get("tool_input") or {}).get("command", "")):
+            block("cd・pushd・popd を含むコマンドは書き込み先の場所が分からないので mode: 新規 では通さない。")
         # tee は書き込み先を複数とれるが、targets() は最初の 1 つしか拾わないので、2 つ以上なら確かめられない
         if d.get("tool_name") == "Bash" and re.search(r"\btee\s+(?:-\S+\s+)*[^\s|;&<>-][^\s|;&<>]*\s+[^\s|;&<>-]", (d.get("tool_input") or {}).get("command", "")):
             block("tee の書き込み先が 2 つ以上あるので mode: 新規 では通さない。")
