@@ -1,0 +1,274 @@
+#!/usr/bin/env bash
+# tmux の上で、隣のペインにエージェントやシェルを出して操作する。
+# エージェントの状態は agent-state-hook が書く ~/.cache/agent-state/<ペイン>.json を読む。
+#
+#   agentctl start <名前> --kind claude|codex [--dir right|down]
+#   agentctl prompt <名前> "<指示>" [--wait] [--timeout <ミリ秒>]
+#   agentctl read <名前> [--lines N]
+#   agentctl list
+#   agentctl shell <名前> [--dir right|down]
+#   agentctl run <名前> "<コマンド>"
+#   agentctl wait-output <名前> --match "<文字列>" [--timeout <ミリ秒>]
+#
+# 終了コード: 0 成功 / 1 失敗（相手が承認待ち・時間切れ等。理由は標準エラー）/ 2 使い方の誤り
+set -euo pipefail
+
+STATE_DIR="$HOME/.cache/agent-state"
+
+die() { echo "agentctl: $*" >&2; exit 1; }
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+now_ms() { date +%s%3N; }
+
+[ -n "${TMUX:-}" ] || die "tmux の中で実行してください"
+
+valid_name() {
+  [[ "$1" =~ ^[a-z][a-z0-9_-]{0,31}$ ]] || { echo "agentctl: 名前は [a-z][a-z0-9_-]{0,31}: $1" >&2; exit 2; }
+}
+
+# 名前 -> ペイン ID（%12 の形）。見つからなければ空。
+pane_of() {
+  tmux list-panes -a -F '#{pane_id} #{@agent_name}' | awk -v n="$1" '$2 == n { print $1; exit }'
+}
+
+need_pane() {
+  local p
+  p="$(pane_of "$1")"
+  [ -n "$p" ] || die "名前 '$1' のペインがありません（agentctl list で確認）"
+  echo "$p"
+}
+
+state_file() { echo "$STATE_DIR/${1#%}.json"; }
+
+# 状態（idle / working / blocked / none）
+state_of() {
+  local f
+  f="$(state_file "$1")"
+  if [ -f "$f" ]; then jq -r '.state // "none"' "$f" 2>/dev/null || echo none; else echo none; fi
+}
+
+prompt_ts_of() {
+  local f
+  f="$(state_file "$1")"
+  if [ -f "$f" ]; then jq -r '.prompt_ts // 0' "$f" 2>/dev/null || echo 0; else echo 0; fi
+}
+
+# 隣にペインを分けて ID を返す
+split_pane() {
+  local dir="$1" flag
+  case "$dir" in
+    right) flag=-h ;;
+    down) flag=-v ;;
+    *) echo "agentctl: --dir は right か down: $dir" >&2; exit 2 ;;
+  esac
+  tmux split-window -d "$flag" -c "$PWD" -t "${TMUX_PANE:-}" -P -F '#{pane_id}'
+}
+
+cmd_start() {
+  local name="${1:-}"; shift || true
+  local kind="" dir=right
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kind) kind="${2:-}"; shift 2 ;;
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$name" ] || usage
+  valid_name "$name"
+  case "$kind" in claude | codex) ;; *) echo "agentctl: --kind は claude か codex" >&2; exit 2 ;; esac
+  [ -z "$(pane_of "$name")" ] || die "名前 '$name' は使用中です"
+
+  local pane
+  pane="$(split_pane "$dir")"
+  tmux set-option -p -t "$pane" @agent_name "$name"
+  tmux set-option -p -t "$pane" @agent_kind "$kind"
+  rm -f "$(state_file "$pane")"
+  # Codex は既定では共有の常駐サーバー（app-server daemon）の中で hook を動かす。
+  # 常駐サーバーには起動したペインの TMUX_PANE が無いので、--no-daemon でペインの中で動かす。
+  local launch="$kind"
+  [ "$kind" = codex ] && launch="codex --no-daemon"
+  tmux send-keys -t "$pane" -l "$launch"
+  tmux send-keys -t "$pane" Enter
+
+  # SessionStart で idle になるまで待つ（最長 30 秒）
+  # Codex は起動しても SessionStart を呼ばない（最初の指示のときに呼ぶ）ので、
+  # Codex だけは画面に入力欄の文字が出たら idle を書く。更新確認などの画面には出ない文字。
+  local deadline=$(( $(now_ms) + 30000 )) st
+  while [ "$(now_ms)" -lt "$deadline" ]; do
+    st="$(state_of "$pane")"
+    if [ "$st" = none ] && [ "$kind" = codex ] &&
+      tmux capture-pane -p -t "$pane" | grep -qF 'Ask Codex to do anything'; then
+      mkdir -p "$STATE_DIR"
+      jq -n --arg pane "$pane" --argjson ts "$(now_ms)" \
+        '{agent:"codex", state:"idle", event:"agentctl-start", session_id:"", pane:$pane, ts:$ts, prompt_ts:0}' \
+        >"$(state_file "$pane")"
+      st=idle
+    fi
+    if [ "$st" = idle ]; then
+      echo "$name $pane $kind idle"
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "$name $pane $kind not_ready" >&2
+  die "30 秒以内に入力待ちになりませんでした。agentctl read $name で画面を確認してください"
+}
+
+cmd_shell() {
+  local name="${1:-}"; shift || true
+  local dir=right
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dir) dir="${2:-}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$name" ] || usage
+  valid_name "$name"
+  [ -z "$(pane_of "$name")" ] || die "名前 '$name' は使用中です"
+  local pane
+  pane="$(split_pane "$dir")"
+  tmux set-option -p -t "$pane" @agent_name "$name"
+  tmux set-option -p -t "$pane" @agent_kind shell
+  echo "$name $pane shell"
+}
+
+cmd_prompt() {
+  local name="${1:-}" text="${2:-}"; shift 2 || usage
+  local wait=0 timeout=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --wait) wait=1; shift ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$text" ] || usage
+  local pane kind st
+  pane="$(need_pane "$name")"
+  kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
+  [ "$kind" != shell ] || die "'$name' はシェルです。agentctl run を使ってください"
+  st="$(state_of "$pane")"
+  # 入力待ち（idle）と hook で確かめられたときだけ送る。
+  # 状態が無い（none）ときは、更新確認などの画面に Enter が入って選択肢を押してしまうので送らない。
+  case "$st" in
+    idle) ;;
+    blocked) die "'$name' は承認待ち（blocked）です。agentctl read $name で確認してください" ;;
+    working) die "'$name' は作業中（working）です。終わってから送ってください" ;;
+    *) die "'$name' の状態が不明（$st）です。入力待ちと確かめられないので送りません。agentctl read $name で確認してください" ;;
+  esac
+
+  local start
+  start="$(now_ms)"
+  # 貼り付け（アプリが bracketed paste を有効にしていれば -p で囲む）してから Enter
+  printf '%s' "$text" | tmux load-buffer -b agentctl -
+  tmux paste-buffer -p -d -b agentctl -t "$pane"
+  sleep 0.3
+  tmux send-keys -t "$pane" Enter
+  [ "$wait" = 1 ] || { echo "sent"; return 0; }
+
+  local deadline=""
+  [ -n "$timeout" ] && deadline=$(( start + timeout ))
+  # 送った指示で UserPromptSubmit が来たことを 10 秒以内に確かめる
+  local accepted=0 gate=$(( start + 10000 ))
+  while :; do
+    local t
+    t="$(now_ms)"
+    if [ -n "$deadline" ] && [ "$t" -ge "$deadline" ]; then
+      die "時間切れ（state=$(state_of "$pane")）。送った指示が届いていないとは限りません。read で確認してください"
+    fi
+    if [ "$accepted" = 0 ]; then
+      if [ "$(prompt_ts_of "$pane")" -ge "$start" ]; then
+        accepted=1
+      elif [ "$t" -ge "$gate" ]; then
+        die "10 秒以内に作業を始めませんでした（stalled）。read で確認してください"
+      fi
+    else
+      st="$(state_of "$pane")"
+      case "$st" in
+        idle) echo "idle"; return 0 ;;
+        blocked) echo "blocked"; return 0 ;;
+      esac
+    fi
+    sleep 0.5
+  done
+}
+
+cmd_read() {
+  local name="${1:-}"; shift || true
+  local lines=50
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --lines) lines="${2:-}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [ -n "$name" ] || usage
+  [[ "$lines" =~ ^[0-9]+$ ]] || { echo "agentctl: --lines は数字" >&2; exit 2; }
+  local pane
+  pane="$(need_pane "$name")"
+  # 画面下の空行を除いてから、最後の N 行を出す
+  tmux capture-pane -p -J -t "$pane" -S "-$lines" |
+    awk '{ buf[NR] = $0 } /[^[:space:]]/ { last = NR } END { for (i = 1; i <= last; i++) print buf[i] }' |
+    tail -n "$lines"
+}
+
+cmd_list() {
+  printf '%-16s %-6s %-7s %-8s %s\n' NAME PANE KIND STATE CWD
+  # 区切りにタブを使うと、空の欄が詰められて列がずれる（タブは空白扱い）ので | にする
+  tmux list-panes -a -F '#{pane_id}|#{@agent_name}|#{@agent_kind}|#{pane_current_path}' |
+    while IFS='|' read -r pane name kind cwd; do
+      [ -n "$name" ] || continue
+      local st=-
+      [ "$kind" = shell ] || st="$(state_of "$pane")"
+      printf '%-16s %-6s %-7s %-8s %s\n' "$name" "$pane" "$kind" "$st" "$cwd"
+    done
+}
+
+cmd_run() {
+  local name="${1:-}" cmd="${2:-}"
+  if [ -z "$name" ] || [ -z "$cmd" ]; then usage; fi
+  local pane
+  pane="$(need_pane "$name")"
+  tmux send-keys -t "$pane" -l "$cmd"
+  tmux send-keys -t "$pane" Enter
+  echo "sent"
+}
+
+cmd_wait_output() {
+  local name="${1:-}"; shift || true
+  local match="" timeout=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --match) match="${2:-}"; shift 2 ;;
+      --timeout) timeout="${2:-}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  if [ -z "$name" ] || [ -z "$match" ]; then usage; fi
+  local pane deadline=""
+  pane="$(need_pane "$name")"
+  [ -n "$timeout" ] && deadline=$(( $(now_ms) + timeout ))
+  while :; do
+    if tmux capture-pane -p -J -t "$pane" -S -500 | grep -qF -- "$match"; then
+      echo "matched"
+      return 0
+    fi
+    if [ -n "$deadline" ] && [ "$(now_ms)" -ge "$deadline" ]; then
+      die "時間切れ: '$match' は出ませんでした"
+    fi
+    sleep 0.5
+  done
+}
+
+sub="${1:-}"; shift || true
+case "$sub" in
+  start) cmd_start "$@" ;;
+  prompt) cmd_prompt "$@" ;;
+  read) cmd_read "$@" ;;
+  list) cmd_list ;;
+  shell) cmd_shell "$@" ;;
+  run) cmd_run "$@" ;;
+  wait-output) cmd_wait_output "$@" ;;
+  *) usage ;;
+esac

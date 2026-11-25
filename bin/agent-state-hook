@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Claude Code / Codex の hook から呼ばれ、tmux ペインごとの状態ファイルを書く。
+# agentctl がこれを読んで、起動・作業中・承認待ち・入力待ちを判断する。
+#
+#   agent-state-hook <claude|codex>   （hook の入力 JSON を標準入力で受け取る）
+#
+# 状態ファイル: ~/.cache/agent-state/<tmux ペイン ID>.json
+#   SessionStart / Stop                         -> idle
+#   UserPromptSubmit / PreToolUse / PostToolUse -> working
+#   PermissionRequest                           -> blocked
+#   SessionEnd                                  -> ファイルを消す
+# tmux の外では何もしない。エージェントの動作を止めないよう、失敗しても常に 0 で終わる。
+
+kind="${1:-}"
+input="$(cat 2>/dev/null || true)"
+[ -n "${TMUX_PANE:-}" ] || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)"
+# Claude のサブエージェントからの hook は親の状態を上書きしない
+subagent="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
+[ -n "$subagent" ] && [ "$event" != "PermissionRequest" ] && exit 0
+
+case "$event" in
+  SessionStart | Stop) state=idle ;;
+  UserPromptSubmit | PreToolUse | PostToolUse) state=working ;;
+  PermissionRequest) state=blocked ;;
+  SessionEnd) state="" ;;
+  *) exit 0 ;;
+esac
+
+dir="$HOME/.cache/agent-state"
+mkdir -p "$dir" 2>/dev/null || exit 0
+file="$dir/${TMUX_PANE#%}.json"
+
+if [ -z "$state" ]; then
+  rm -f "$file"
+  exit 0
+fi
+
+now="$(date +%s%3N)"
+prev_prompt=0
+if [ -f "$file" ]; then
+  prev_prompt="$(jq -r '.prompt_ts // 0' "$file" 2>/dev/null || echo 0)"
+fi
+prompt_ts="$prev_prompt"
+[ "$event" = "UserPromptSubmit" ] && prompt_ts="$now"
+session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
+
+tmp="$(mktemp "$dir/.tmp.XXXXXX" 2>/dev/null)" || exit 0
+jq -n --arg kind "$kind" --arg state "$state" --arg event "$event" \
+  --arg session "$session" --arg pane "$TMUX_PANE" \
+  --argjson ts "$now" --argjson prompt_ts "${prompt_ts:-0}" \
+  '{agent:$kind, state:$state, event:$event, session_id:$session, pane:$pane, ts:$ts, prompt_ts:$prompt_ts}' \
+  >"$tmp" 2>/dev/null && mv -f "$tmp" "$file"
+rm -f "$tmp" 2>/dev/null
+exit 0
