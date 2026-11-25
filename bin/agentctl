@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# tmux の上で、隣のペインにエージェントを、別のウィンドウにシェルを出して操作する。
+# tmux の上で、隣のペインにエージェントやシェルを出して操作する。
 # エージェントの状態は agent-state-hook が書く ~/.cache/agent-state/<ペイン>.json を読む。
 #
-#   agentctl start <名前> --kind claude|codex [--dir right|down]
+#   agentctl start <名前> --kind claude|codex
 #   agentctl prompt <名前> "<指示>" [--wait] [--timeout <ミリ秒>]
 #   agentctl read <名前> [--lines N]
 #   agentctl list
@@ -151,24 +151,28 @@ fix_interrupted() {
     --arg ts0 "$ts0" --argjson now "$(now_ms)"
 }
 
-# 隣にペインを分けて ID を返す
+# 新しいペインを作って ID を返す。
+#   呼んだペインのウィンドウに agentctl のペイン（名前付き）がまだ無ければ、呼んだペインの右に出す。
+#   あれば、それらのうち一番下のペインを上下に分けて右の列に積み、右の列の高さをそろえる。
 split_pane() {
-  local dir="$1" flag
-  case "$dir" in
-    right) flag=-h ;;
-    down) flag=-v ;;
-    *) echo "agentctl: --dir は right か down: $dir" >&2; exit 2 ;;
-  esac
-  tmux split-window -d "$flag" -c "$PWD" -t "${TMUX_PANE:-}" -P -F '#{pane_id}'
+  local caller="${TMUX_PANE:-}" bottom pane
+  bottom="$(tmux list-panes -t "$caller" -F '#{pane_bottom} #{pane_id} #{@agent_name}' |
+    awk -v c="$caller" '$2 != c && $3 != "" { print }' | sort -n | tail -n 1 | cut -d' ' -f2)"
+  if [ -z "$bottom" ]; then
+    tmux split-window -d -h -c "$PWD" -t "$caller" -P -F '#{pane_id}'
+    return
+  fi
+  pane="$(tmux split-window -d -v -c "$PWD" -t "$bottom" -P -F '#{pane_id}')"
+  tmux select-layout -E -t "$pane" 2>/dev/null || true
+  echo "$pane"
 }
 
 cmd_start() {
   local name="${1:-}"; shift || true
-  local kind="" dir=right
+  local kind=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --kind) need_value $#; kind="$2"; shift 2 ;;
-      --dir) need_value $#; dir="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
@@ -178,7 +182,7 @@ cmd_start() {
   [ -z "$(pane_of "$name")" ] || die "名前 '$name' は使用中です"
 
   local pane
-  pane="$(split_pane "$dir")"
+  pane="$(split_pane)"
   tmux set-option -p -t "$pane" @agent_name "$name"
   tmux set-option -p -t "$pane" @agent_kind "$kind"
   rm -f "$(state_file "$pane")"
@@ -219,11 +223,9 @@ cmd_shell() {
   [ -n "$name" ] || usage
   valid_name "$name"
   [ -z "$(pane_of "$name")" ] || die "名前 '$name' は使用中です"
-  # シェルは今のウィンドウを分けず、別のウィンドウに出す（フォーカスは移さない）
+  # シェルもエージェントと同じく、右の列にペインを出す（フォーカスは移さない）
   local pane
-  local session
-  session="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_id}')"
-  pane="$(tmux new-window -d -c "$PWD" -t "$session:" -P -F '#{pane_id}')"
+  pane="$(split_pane)"
   tmux set-option -p -t "$pane" @agent_name "$name"
   tmux set-option -p -t "$pane" @agent_kind shell
   echo "$name $pane shell"
