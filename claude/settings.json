@@ -4,6 +4,17 @@
   },
   "model": "opus",
   "hooks": {
+        "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
