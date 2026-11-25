@@ -37,7 +37,8 @@ valid_name() {
 # 空の名前は、名前の無いペイン（@agent_name が空）に当たってしまうので使い方の誤りにする
 pane_of() {
   [ -n "$1" ] || usage
-  tmux list-panes -a -F '#{pane_id} #{@agent_name}' | awk -v n="$1" '$2 == n { print $1; exit }'
+  # awk を途中で終わらせると、pipefail で tmux 側の書き込み失敗が失敗扱いになるので最後まで読む
+  tmux list-panes -a -F '#{pane_id} #{@agent_name}' | awk -v n="$1" '$2 == n && !found { print $1; found = 1 }'
 }
 
 need_pane() {
@@ -81,6 +82,20 @@ prompt_sha() {
   fi
 }
 
+# flock が無い端末（Mac の標準など）では mkdir のロックを使う（agent-state-hook も同じやり方）。
+#   lock_dir_acquire <ディレクトリ> <0.1 秒単位の待ち回数>
+lock_dir_acquire() {
+  local d="$1" tries="$2" i=0 age
+  while :; do
+    mkdir "$d" 2>/dev/null && return 0
+    # 10 秒より古いロックは、持ち主が落ちたものとみなして消す
+    age="$(perl -e 'my @s = stat shift; print @s ? time - $s[9] : 0' "$d" 2>/dev/null || echo 0)"
+    if [ "${age:-0}" -gt 10 ]; then rm -rf "$d"; continue; fi
+    [ "$i" -ge "$tries" ] && return 1
+    i=$((i + 1)); sleep 0.1
+  done
+}
+
 # 状態ファイルを hook と同じロックの中で書き換える。
 #   locked_update <ペイン> <条件の jq 式> <書き換えの jq 式> [jq の引数...]
 # 条件が真のときだけ書き換えて 0 を返す。ロックが取れない・条件が偽・失敗なら 1。
@@ -90,8 +105,13 @@ locked_update() {
   f="$(state_file "$pane")"
   mkdir -p "$STATE_DIR"
   (
-    exec 9>"$f.lock" || exit 1
-    if command -v flock >/dev/null 2>&1; then flock -w 5 9 || exit 1; fi
+    if command -v flock >/dev/null 2>&1; then
+      exec 9>"$f.lock" || exit 1
+      flock -w 5 9 || exit 1
+    else
+      lock_dir_acquire "$f.lock.d" 50 || exit 1
+      trap 'rm -rf "$f.lock.d"' EXIT
+    fi
     cur='null'
     [ -f "$f" ] && cur="$(cat "$f" 2>/dev/null)"
     [ -n "$cur" ] || cur='null'
@@ -125,9 +145,12 @@ agent_running() {
 #   Codex : 文章を書き出している間はこの行を消すので、2 秒空けて 2 回続けて無く、
 #           かつ 2 回の画面が同じ（書き出しが止まっている）とき
 has_indicator() {
-  printf '%s\n' "$1" |
+  local bottom
+  bottom="$(printf '%s\n' "$1" |
     awk '{ buf[NR] = $0 } /[^[:space:]]/ { last = NR } END { for (i = 1; i <= last; i++) print buf[i] }' |
-    tail -n 10 | grep -qiF 'esc to'
+    tail -n 10)"
+  # パイプの先で grep -q が早く終わると pipefail で失敗扱いになるので、ヒアストリングで渡す
+  grep -qiF 'esc to' <<<"$bottom"
 }
 fix_interrupted() {
   local pane="$1" kind ts0 s1 s2 width
@@ -200,7 +223,7 @@ cmd_start() {
   while [ "$(now_ms)" -lt "$deadline" ]; do
     st="$(state_of "$pane")"
     if [ "$st" = none ] && [ "$kind" = codex ] &&
-      tmux capture-pane -p -t "$pane" | grep -qF 'Ask Codex to do anything'; then
+      grep -qF 'Ask Codex to do anything' <<<"$(tmux capture-pane -p -t "$pane")"; then
       # hook がまだ何も書いていないときだけ、ロックの中で仮の idle を置く
       locked_update "$pane" '. == null' \
         '{agent:"codex", state:"idle", event:"agentctl-start", session_id:"", pane:$pane, ts:$now, prompt_ts:0, prompt_sha:"", pending:[]}' \
@@ -248,13 +271,19 @@ cmd_prompt() {
   pane="$(need_pane "$name")"
   kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
   [ "$kind" != shell ] || die "'$name' はシェルです。agentctl run を使ってください"
-  # 同じペインへの送信は 1 つずつ。受け付けを確かめるか 10 秒たつまで送信ロックを持つ
+  # 同じペインへの送信は 1 つずつ。送信ロックは、--wait なしなら受け付けまで、
+  # --wait なら作業が終わるまで持つ（途中で別の指示が入ると、それを待ってしまうため）。
+  # スクリプトが終わればロックは放される（flock はプロセスの終了で、mkdir のロックは trap で）。
   local sendlock
   sendlock="$(state_file "$pane").send.lock"
   mkdir -p "$STATE_DIR"
-  exec 8>"$sendlock" || die "送信ロックを作れません: $sendlock"
   if command -v flock >/dev/null 2>&1; then
+    exec 8>"$sendlock" || die "送信ロックを作れません: $sendlock"
     flock -n 8 || die "'$name' には別の agentctl prompt が送信中です。終わってから送ってください"
+  else
+    lock_dir_acquire "$sendlock.d" 0 || die "'$name' には別の agentctl prompt が送信中です。終わってから送ってください"
+    SEND_LOCK_DIR="$sendlock.d"
+    trap 'rm -rf "$SEND_LOCK_DIR"' EXIT
   fi
 
   st="$(state_of "$pane")"
@@ -290,9 +319,11 @@ cmd_prompt() {
   # 送った指示で UserPromptSubmit が来たことを 10 秒以内に確かめる（--wait なしでもここまでは待つ）。
   # 時刻が送った後で、指示の文の sha256 が送った文と同じなら受け付け（定期タスクなどの指示と区別する）。
   # Codex など hook の入力に指示の文が無いとき（prompt_sha が空）は時刻だけで判断する。
-  local accepted=0 gate=$(( start + 10000 )) t sha
+  local accepted=0 gate=$(( start + 10000 )) t snap sha pts
   while :; do
     t="$(now_ms)"
+    # mkdir のロックは 10 秒より古いと消されるので、持っている間は時刻を新しくする
+    [ -z "${SEND_LOCK_DIR:-}" ] || touch "$SEND_LOCK_DIR" 2>/dev/null || true
     if [ -n "$deadline" ] && [ "$t" -ge "$deadline" ]; then
       die "時間切れ（state=$(state_of "$pane")）。送った指示が届いていないとは限りません。read で確認してください"
     fi
@@ -300,14 +331,20 @@ cmd_prompt() {
     tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 ||
       die "'$name' のペインがなくなりました"
     agent_running "$pane" || die "'$name' のエージェントが終了しました"
-    st="$(state_of "$pane")"
+    # 状態ファイルは 1 回だけ読み、同じ記録の state・prompt_ts・prompt_sha で判断する
+    snap="$(jq -r '[(.state // "none"), ((.prompt_ts // 0) | tostring), (.prompt_sha // "")] | join(" ")' \
+      "$(state_file "$pane")" 2>/dev/null || echo "none 0 ")"
+    read -r st pts sha <<<"$snap"
+    [[ "$pts" =~ ^[0-9]+$ ]] || pts=0
     [ "$st" != none ] || die "'$name' の状態ファイルがなくなりました（エージェントが終了した可能性）"
     if [ "$accepted" = 0 ]; then
-      sha="$(field_of "$pane" prompt_sha "")"
-      if [ "$(field_of "$pane" prompt_ts 0)" -ge "$start" ] && { [ -z "$sha" ] || [ "$sha" = "$mysha" ]; }; then
+      if [ "$pts" -ge "$start" ] && { [ -z "$sha" ] || [ "$sha" = "$mysha" ]; }; then
         accepted=1
-        exec 8>&-
-        [ "$wait" = 1 ] || { echo "sent"; return 0; }
+        if [ "$wait" != 1 ]; then
+          # --wait なしは、受け付けた時点で送信ロックを放して戻る
+          echo "sent"
+          return 0
+        fi
       elif [ "$t" -ge "$gate" ]; then
         die "10 秒以内に作業を始めませんでした（stalled）。read で確認してください"
       fi
@@ -383,7 +420,8 @@ cmd_wait_output() {
     # 画面を読めない（ペインが消えた等）ときは待ち続けずに止める
     screen="$(tmux capture-pane -p -J -t "$pane" -S -500 2>/dev/null)" ||
       die "'$name' の画面を読めません（ペインが閉じられた可能性）"
-    if printf '%s\n' "$screen" | grep -qF -- "$match"; then
+    # パイプの先で grep -q が早く終わると pipefail で失敗扱いになるので、ヒアストリングで渡す
+    if grep -qF -- "$match" <<<"$screen"; then
       echo "matched"
       return 0
     fi

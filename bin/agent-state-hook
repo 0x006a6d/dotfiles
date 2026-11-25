@@ -56,9 +56,24 @@ file="$dir/${TMUX_PANE#%}.json"
 
 # 同じペインの hook が同時に動いても読み書きが混ざらないよう、1 つずつ行う。
 # ロックが取れなければ、ほかの書き込みを上書きしないよう何もしない
-exec 9>"$file.lock" 2>/dev/null || exit 0
+# flock が無い端末（Mac の標準など）では mkdir のロックを使う（agentctl も同じやり方）
+lock_dir_acquire() {
+  local d="$1" tries="$2" i=0 age
+  while :; do
+    mkdir "$d" 2>/dev/null && return 0
+    # 10 秒より古いロックは、持ち主が落ちたものとみなして消す
+    age="$(perl -e 'my @s = stat shift; print @s ? time - $s[9] : 0' "$d" 2>/dev/null || echo 0)"
+    if [ "${age:-0}" -gt 10 ]; then rm -rf "$d"; continue; fi
+    [ "$i" -ge "$tries" ] && return 1
+    i=$((i + 1)); sleep 0.1
+  done
+}
 if command -v flock >/dev/null 2>&1; then
+  exec 9>"$file.lock" 2>/dev/null || exit 0
   flock -w 5 9 || exit 0
+else
+  lock_dir_acquire "$file.lock.d" 50 || exit 0
+  trap 'rm -rf "$file.lock.d"' EXIT
 fi
 
 cur_state="none"
