@@ -5,14 +5,14 @@
 #   agent-state-hook <claude|codex>   （hook の入力 JSON を標準入力で受け取る）
 #
 # 状態ファイル: ~/.cache/agent-state/<tmux ペイン ID>.json
-#   SessionStart / Stop                         -> idle
+#   SessionStart（compact 以外）/ Stop          -> idle
 #   UserPromptSubmit / PreToolUse / PostToolUse -> working
 #   PermissionRequest                           -> blocked
 #   SessionEnd                                  -> ファイルを消す
 # サブエージェント（agent_id 付き）の hook は親の状態を上書きしない。ただし
 #   PermissionRequest                    -> blocked（承認画面は親のペインに出る）
 #   PostToolUse（今の状態が blocked のとき）-> working（承認された）
-#   SubagentStop（サブエージェントが blocked/working にしていたとき）-> idle
+#   SubagentStop（サブエージェントが blocked/working にしていたとき）-> working（親はまだ動いている）
 # tmux の外では何もしない。エージェントの動作を止めないよう、失敗しても常に 0 で終わる。
 
 kind="${1:-}"
@@ -54,7 +54,8 @@ fi
 state=""
 by_sub=false
 if [ "$event" = SubagentStop ]; then
-  if [ "$cur_by_sub" = true ]; then state=idle; else exit 0; fi
+  # サブエージェントが終わっても親は作業を続けている（並列の別のサブエージェントもいる）ので working に戻す
+  if [ "$cur_by_sub" = true ]; then state=working; else exit 0; fi
 elif [ -n "$subagent" ]; then
   case "$event" in
     PermissionRequest) state=blocked; by_sub=true ;;
@@ -62,6 +63,9 @@ elif [ -n "$subagent" ]; then
     *) exit 0 ;;
   esac
 else
+  # 圧縮（compact）後の SessionStart は作業の途中でも来るので、状態を変えない
+  source="$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null)"
+  [ "$event" = SessionStart ] && [ "$source" = compact ] && exit 0
   case "$event" in
     SessionStart | Stop) state=idle ;;
     UserPromptSubmit | PreToolUse | PostToolUse) state=working ;;

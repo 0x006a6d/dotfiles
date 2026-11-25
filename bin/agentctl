@@ -34,7 +34,9 @@ valid_name() {
 }
 
 # 名前 -> ペイン ID（%12 の形）。見つからなければ空。
+# 空の名前は、名前の無いペイン（@agent_name が空）に当たってしまうので使い方の誤りにする
 pane_of() {
+  [ -n "$1" ] || usage
   tmux list-panes -a -F '#{pane_id} #{@agent_name}' | awk -v n="$1" '$2 == n { print $1; exit }'
 }
 
@@ -43,6 +45,13 @@ need_pane() {
   p="$(pane_of "$1")"
   [ -n "$p" ] || die "名前 '$1' のペインがありません（agentctl list で確認）"
   echo "$p"
+}
+
+# オプションに値があるか（無ければ使い方の誤り）
+need_value() { [ "$1" -ge 2 ] || usage; }
+# --timeout は数字だけ（算術式に入れるので、それ以外は受け付けない）
+check_timeout() {
+  [ -z "$1" ] || [[ "$1" =~ ^[0-9]+$ ]] || { echo "agentctl: --timeout はミリ秒の数字: $1" >&2; exit 2; }
 }
 
 state_file() { echo "$STATE_DIR/${1#%}.json"; }
@@ -58,6 +67,42 @@ prompt_ts_of() {
   local f
   f="$(state_file "$1")"
   if [ -f "$f" ]; then jq -r '.prompt_ts // 0' "$f" 2>/dev/null || echo 0; else echo 0; fi
+}
+
+# Esc の中断では hook が来ず、状態ファイルが working のまま残る。作業中は画面の下に
+# 「esc to interrupt」が出るので、working なのに画面の最後の 10 行にこれが無ければ、
+# 中断されたとみなして idle に書き直す（書き直したら 0 を返す）。
+#   Claude: 1 秒空けて 2 回続けて無いとき
+#   Codex : 文章を書き出している間はこの行を消すので、2 秒空けて 2 回続けて無く、
+#           かつ 2 回の画面が同じ（書き出しが止まっている）とき
+has_indicator() {
+  printf '%s\n' "$1" |
+    awk '{ buf[NR] = $0 } /[^[:space:]]/ { last = NR } END { for (i = 1; i <= last; i++) print buf[i] }' |
+    tail -n 10 | grep -qiF 'esc to interrupt'
+}
+fix_interrupted() {
+  local pane="$1" kind f tmp s1 s2
+  kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
+  s1="$(tmux capture-pane -p -t "$pane" 2>/dev/null)" || return 1
+  has_indicator "$s1" && return 1
+  if [ "$kind" = codex ]; then sleep 2; else sleep 1; fi
+  s2="$(tmux capture-pane -p -t "$pane" 2>/dev/null)" || return 1
+  has_indicator "$s2" && return 1
+  if [ "$kind" = codex ] && [ "$s1" != "$s2" ]; then return 1; fi
+  f="$(state_file "$pane")"
+  [ -f "$f" ] || return 1
+  # hook と同じロックで、まだ working のときだけ書き直す
+  (
+    exec 9>"$f.lock"
+    command -v flock >/dev/null 2>&1 && flock -w 5 9
+    [ "$(jq -r '.state // ""' "$f" 2>/dev/null)" = working ] || exit 1
+    tmp="$(mktemp "$STATE_DIR/.tmp.XXXXXX")" || exit 1
+    if jq --argjson ts "$(now_ms)" '.state = "idle" | .event = "agentctl-interrupted" | .ts = $ts | .by_subagent = false' "$f" >"$tmp"; then
+      mv -f "$tmp" "$f"
+    else
+      rm -f "$tmp"; exit 1
+    fi
+  )
 }
 
 # 隣にペインを分けて ID を返す
@@ -76,8 +121,8 @@ cmd_start() {
   local kind="" dir=right
   while [ $# -gt 0 ]; do
     case "$1" in
-      --kind) kind="${2:-}"; shift 2 ;;
-      --dir) dir="${2:-}"; shift 2 ;;
+      --kind) need_value $#; kind="$2"; shift 2 ;;
+      --dir) need_value $#; dir="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
@@ -144,16 +189,19 @@ cmd_prompt() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --wait) wait=1; shift ;;
-      --timeout) timeout="${2:-}"; shift 2 ;;
+      --timeout) need_value $#; timeout="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
+  [ -n "$name" ] || usage
   [ -n "$text" ] || usage
+  check_timeout "$timeout"
   local pane kind st
   pane="$(need_pane "$name")"
   kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
   [ "$kind" != shell ] || die "'$name' はシェルです。agentctl run を使ってください"
   st="$(state_of "$pane")"
+  if [ "$st" = working ] && fix_interrupted "$pane"; then st=idle; fi
   # 入力待ち（idle）と hook で確かめられたときだけ送る。
   # 状態が無い（none）ときは、更新確認などの画面に Enter が入って選択肢を押してしまうので送らない。
   case "$st" in
@@ -166,8 +214,10 @@ cmd_prompt() {
   # 指示がコマンドとして実行されてしまう。送る直前に、動いているのがエージェントか確かめる。
   local cur
   cur="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null || true)"
+  # ネイティブ版の Claude は、Mac の tmux ではコマンド名がバージョン番号（2.1.332 等）になる
   case "$cur" in
     claude | codex | node) ;;
+    [0-9]*.[0-9]*.[0-9]*) [ "$kind" = claude ] || die "'$name' のペインで動いているのは '$cur' で、エージェントではありません（終了した可能性）。送りません" ;;
     *) die "'$name' のペインで動いているのは '$cur' で、エージェントではありません（終了した可能性）。送りません" ;;
   esac
 
@@ -205,6 +255,7 @@ cmd_prompt() {
       case "$st" in
         idle) echo "idle"; return 0 ;;
         blocked) echo "blocked"; die "'$name' が承認待ち（blocked）で止まりました。agentctl read $name で確認してください" ;;
+        working) if fix_interrupted "$pane"; then echo "idle"; return 0; fi ;;
       esac
     fi
     sleep 0.5
@@ -216,7 +267,7 @@ cmd_read() {
   local lines=50
   while [ $# -gt 0 ]; do
     case "$1" in
-      --lines) lines="${2:-}"; shift 2 ;;
+      --lines) need_value $#; lines="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
@@ -257,12 +308,13 @@ cmd_wait_output() {
   local match="" timeout=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --match) match="${2:-}"; shift 2 ;;
-      --timeout) timeout="${2:-}"; shift 2 ;;
+      --match) need_value $#; match="$2"; shift 2 ;;
+      --timeout) need_value $#; timeout="$2"; shift 2 ;;
       *) usage ;;
     esac
   done
   if [ -z "$name" ] || [ -z "$match" ]; then usage; fi
+  check_timeout "$timeout"
   local pane deadline=""
   pane="$(need_pane "$name")"
   [ -n "$timeout" ] && deadline=$(( $(now_ms) + timeout ))

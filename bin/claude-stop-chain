@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Claude Code の Stop hook を 1 本にまとめる。
+# 同じイベントの hook は並列に動くので、ゲートが Claude を止めずに作業を続けさせても、
+# agent-state-hook が同時に idle を書いてしまう。ここでゲートを先に動かし、
+# どれも止めなかったときだけ agent-state-hook に渡して idle にする。
+#
+#   claude-stop-chain   （Stop の入力 JSON を標準入力で受け取る）
+#
+# ゲートは両方動かし、止めた理由（decision: block の reason、または終了コード 2 の標準エラー）を
+# まとめて 1 つの decision: block で返す。ゲートが時間切れ・失敗のときは、止めなかった扱い。
+input="$(cat 2>/dev/null || true)"
+
+gates=(
+  "$HOME/claude-config/hooks/completion_gate.py"
+  "$HOME/claude-config/hooks/cause_gate.py"
+)
+
+reasons=()
+for g in "${gates[@]}"; do
+  [ -f "$g" ] || continue
+  errf="$(mktemp)"
+  out="$(printf '%s' "$input" | timeout 10 python3 "$g" 2>"$errf")"
+  rc=$?
+  if [ "$rc" = 2 ]; then
+    r="$(cat "$errf")"
+    [ -n "$r" ] && reasons+=("$r")
+  elif [ "$rc" = 0 ] && [ -n "$out" ]; then
+    r="$(printf '%s' "$out" | jq -r 'select(.decision == "block") | .reason // ""' 2>/dev/null)"
+    [ -n "$r" ] && reasons+=("$r")
+  fi
+  rm -f "$errf"
+done
+
+if [ "${#reasons[@]}" -gt 0 ]; then
+  # Claude は作業を続けるので、状態は working のまま（agent-state-hook は呼ばない）
+  printf '%s\n\n' "${reasons[@]}" | jq -Rs '{decision: "block", reason: sub("\n+$"; "")}'
+  exit 0
+fi
+
+printf '%s' "$input" | "$HOME/dotfiles/bin/agent-state-hook" claude
+exit 0
