@@ -117,6 +117,9 @@ def main():
                 block("書き込み先にシェルの展開（$ ` * ? [ {）を含むので mode: 新規 では通さない: " + p)
             if p.startswith("("):     # 書き込み先のパスが分からないものは、新規かどうかを確かめられない
                 block("書き込み先のパスが分からないので mode: 新規 では通さない。")
+            # >new.py>old.py のように区切り文字が付いたまま拾われると、1 つの名前と見誤る
+            if re.search(r"[<>|;&()]", p):
+                block("書き込み先にシェルの区切り（< > | ; & ( )）を含むので mode: 新規 では通さない: " + p)
             if os.path.lexists(os.path.join(base, os.path.expanduser(p))):
                 block("書き込み先がすでに存在する（既存の書き換えは mode: 修正）: " + p)
         sys.exit(0)
