@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# tmux の上で、隣のペインにエージェントやシェルを出して操作する。
+# tmux の上で、隣のペインにエージェントを、別のウィンドウにシェルを出して操作する。
 # エージェントの状態は agent-state-hook が書く ~/.cache/agent-state/<ペイン>.json を読む。
 #
 #   agentctl start <名前> --kind claude|codex [--dir right|down]
 #   agentctl prompt <名前> "<指示>" [--wait] [--timeout <ミリ秒>]
 #   agentctl read <名前> [--lines N]
 #   agentctl list
-#   agentctl shell <名前> [--dir right|down]
+#   agentctl shell <名前>
 #   agentctl run <名前> "<コマンド>"
 #   agentctl wait-output <名前> --match "<文字列>" [--timeout <ミリ秒>]
 #
@@ -116,18 +116,15 @@ cmd_start() {
 
 cmd_shell() {
   local name="${1:-}"; shift || true
-  local dir=right
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --dir) dir="${2:-}"; shift 2 ;;
-      *) usage ;;
-    esac
-  done
+  [ $# -eq 0 ] || usage
   [ -n "$name" ] || usage
   valid_name "$name"
   [ -z "$(pane_of "$name")" ] || die "名前 '$name' は使用中です"
+  # シェルは今のウィンドウを分けず、別のウィンドウに出す（フォーカスは移さない）
   local pane
-  pane="$(split_pane "$dir")"
+  local session
+  session="$(tmux display-message -p -t "${TMUX_PANE:-}" '#{session_id}')"
+  pane="$(tmux new-window -d -c "$PWD" -t "$session:" -P -F '#{pane_id}')"
   tmux set-option -p -t "$pane" @agent_name "$name"
   tmux set-option -p -t "$pane" @agent_kind shell
   echo "$name $pane shell"
