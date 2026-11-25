@@ -9,6 +9,10 @@
 #   UserPromptSubmit / PreToolUse / PostToolUse -> working
 #   PermissionRequest                           -> blocked
 #   SessionEnd                                  -> ファイルを消す
+# サブエージェント（agent_id 付き）の hook は親の状態を上書きしない。ただし
+#   PermissionRequest                    -> blocked（承認画面は親のペインに出る）
+#   PostToolUse（今の状態が blocked のとき）-> working（承認された）
+#   SubagentStop（サブエージェントが blocked/working にしていたとき）-> idle
 # tmux の外では何もしない。エージェントの動作を止めないよう、失敗しても常に 0 で終わる。
 
 kind="${1:-}"
@@ -16,42 +20,67 @@ input="$(cat 2>/dev/null || true)"
 [ -n "${TMUX_PANE:-}" ] || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
-event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)"
-# Claude のサブエージェントからの hook は親の状態を上書きしない
-subagent="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
-[ -n "$subagent" ] && [ "$event" != "PermissionRequest" ] && exit 0
+# ミリ秒の時刻。Mac の date は %N を受け付けないので perl で取る
+now_ms() {
+  local t
+  t="$(date +%s%3N 2>/dev/null)"
+  case "$t" in
+    '' | *[!0-9]*) perl -MTime::HiRes=time -e 'printf "%d\n", time() * 1000' ;;
+    *) echo "$t" ;;
+  esac
+}
 
-case "$event" in
-  SessionStart | Stop) state=idle ;;
-  UserPromptSubmit | PreToolUse | PostToolUse) state=working ;;
-  PermissionRequest) state=blocked ;;
-  SessionEnd) state="" ;;
-  *) exit 0 ;;
-esac
+event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)"
+subagent="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
+session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
 
 dir="$HOME/.cache/agent-state"
 mkdir -p "$dir" 2>/dev/null || exit 0
 file="$dir/${TMUX_PANE#%}.json"
 
-if [ -z "$state" ]; then
-  rm -f "$file"
-  exit 0
-fi
+# 同じペインの hook が同時に動いても読み書きが混ざらないよう、1 つずつ行う
+exec 9>"$file.lock" 2>/dev/null || exit 0
+command -v flock >/dev/null 2>&1 && flock -w 5 9
 
-now="$(date +%s%3N)"
+cur_state="none"
+cur_by_sub=false
 prev_prompt=0
 if [ -f "$file" ]; then
+  cur_state="$(jq -r '.state // "none"' "$file" 2>/dev/null || echo none)"
+  cur_by_sub="$(jq -r '.by_subagent // false' "$file" 2>/dev/null || echo false)"
   prev_prompt="$(jq -r '.prompt_ts // 0' "$file" 2>/dev/null || echo 0)"
 fi
+
+state=""
+by_sub=false
+if [ "$event" = SubagentStop ]; then
+  if [ "$cur_by_sub" = true ]; then state=idle; else exit 0; fi
+elif [ -n "$subagent" ]; then
+  case "$event" in
+    PermissionRequest) state=blocked; by_sub=true ;;
+    PostToolUse) [ "$cur_state" = blocked ] || exit 0; state=working; by_sub=true ;;
+    *) exit 0 ;;
+  esac
+else
+  case "$event" in
+    SessionStart | Stop) state=idle ;;
+    UserPromptSubmit | PreToolUse | PostToolUse) state=working ;;
+    PermissionRequest) state=blocked ;;
+    SessionEnd) rm -f "$file"; exit 0 ;;
+    *) exit 0 ;;
+  esac
+fi
+
+now="$(now_ms)"
+case "$prev_prompt" in '' | *[!0-9]*) prev_prompt=0 ;; esac
 prompt_ts="$prev_prompt"
-[ "$event" = "UserPromptSubmit" ] && prompt_ts="$now"
-session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
+[ "$event" = UserPromptSubmit ] && [ -z "$subagent" ] && prompt_ts="$now"
 
 tmp="$(mktemp "$dir/.tmp.XXXXXX" 2>/dev/null)" || exit 0
 jq -n --arg kind "$kind" --arg state "$state" --arg event "$event" \
   --arg session "$session" --arg pane "$TMUX_PANE" \
-  --argjson ts "$now" --argjson prompt_ts "${prompt_ts:-0}" \
-  '{agent:$kind, state:$state, event:$event, session_id:$session, pane:$pane, ts:$ts, prompt_ts:$prompt_ts}' \
+  --argjson ts "$now" --argjson prompt_ts "$prompt_ts" --argjson by_sub "$by_sub" \
+  '{agent:$kind, state:$state, event:$event, session_id:$session, pane:$pane, ts:$ts, prompt_ts:$prompt_ts, by_subagent:$by_sub}' \
   >"$tmp" 2>/dev/null && mv -f "$tmp" "$file"
 rm -f "$tmp" 2>/dev/null
 exit 0

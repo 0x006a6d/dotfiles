@@ -17,7 +17,15 @@ STATE_DIR="$HOME/.cache/agent-state"
 
 die() { echo "agentctl: $*" >&2; exit 1; }
 usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
-now_ms() { date +%s%3N; }
+# ミリ秒の時刻。Mac の date は %N を受け付けないので perl で取る
+now_ms() {
+  local t
+  t="$(date +%s%3N 2>/dev/null)"
+  case "$t" in
+    '' | *[!0-9]*) perl -MTime::HiRes=time -e 'printf "%d\n", time() * 1000' ;;
+    *) echo "$t" ;;
+  esac
+}
 
 [ -n "${TMUX:-}" ] || die "tmux の中で実行してください"
 
@@ -154,12 +162,24 @@ cmd_prompt() {
     working) die "'$name' は作業中（working）です。終わってから送ってください" ;;
     *) die "'$name' の状態が不明（$st）です。入力待ちと確かめられないので送りません。agentctl read $name で確認してください" ;;
   esac
+  # 状態ファイルが idle のままエージェントが終了していると、ペインはシェルに戻っていて
+  # 指示がコマンドとして実行されてしまう。送る直前に、動いているのがエージェントか確かめる。
+  local cur
+  cur="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null || true)"
+  case "$cur" in
+    claude | codex | node) ;;
+    *) die "'$name' のペインで動いているのは '$cur' で、エージェントではありません（終了した可能性）。送りません" ;;
+  esac
 
-  local start
+  local start buf="agentctl-$$"
   start="$(now_ms)"
-  # 貼り付け（アプリが bracketed paste を有効にしていれば -p で囲む）してから Enter
-  printf '%s' "$text" | tmux load-buffer -b agentctl -
-  tmux paste-buffer -p -d -b agentctl -t "$pane"
+  # 貼り付け（アプリが bracketed paste を有効にしていれば -p で囲む）してから Enter。
+  # バッファは tmux 全体で共有なので、呼び出しごとに別の名前にする
+  printf '%s' "$text" | tmux load-buffer -b "$buf" -
+  if ! tmux paste-buffer -p -d -b "$buf" -t "$pane"; then
+    tmux delete-buffer -b "$buf" 2>/dev/null || true
+    die "'$name' のペインに貼り付けられませんでした"
+  fi
   sleep 0.3
   tmux send-keys -t "$pane" Enter
   [ "$wait" = 1 ] || { echo "sent"; return 0; }
@@ -184,7 +204,7 @@ cmd_prompt() {
       st="$(state_of "$pane")"
       case "$st" in
         idle) echo "idle"; return 0 ;;
-        blocked) echo "blocked"; return 0 ;;
+        blocked) echo "blocked"; die "'$name' が承認待ち（blocked）で止まりました。agentctl read $name で確認してください" ;;
       esac
     fi
     sleep 0.5
@@ -246,8 +266,12 @@ cmd_wait_output() {
   local pane deadline=""
   pane="$(need_pane "$name")"
   [ -n "$timeout" ] && deadline=$(( $(now_ms) + timeout ))
+  local screen
   while :; do
-    if tmux capture-pane -p -J -t "$pane" -S -500 | grep -qF -- "$match"; then
+    # 画面を読めない（ペインが消えた等）ときは待ち続けずに止める
+    screen="$(tmux capture-pane -p -J -t "$pane" -S -500 2>/dev/null)" ||
+      die "'$name' の画面を読めません（ペインが閉じられた可能性）"
+    if printf '%s\n' "$screen" | grep -qF -- "$match"; then
       echo "matched"
       return 0
     fi
