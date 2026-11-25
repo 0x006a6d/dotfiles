@@ -7,7 +7,9 @@
 #   claude-stop-chain   （Stop の入力 JSON を標準入力で受け取る）
 #
 # ゲートは両方動かし、止めた理由（decision: block の reason、または終了コード 2 の標準エラー）を
-# まとめて 1 つの decision: block で返す。ゲートが時間切れ・失敗のときは、止めなかった扱い。
+# まとめて 1 つの decision: block で返す。終了コード 2 で標準エラーが空でも止める（決まった理由を入れる）。
+# ゲートが時間切れ・失敗のときは、止めなかった扱い。
+# JSON の読み書きは python3 で行う（ゲート自体が python3 で動くので必ずある。jq は無い環境がある）。
 input="$(cat 2>/dev/null || true)"
 
 gates=(
@@ -15,17 +17,40 @@ gates=(
   "$HOME/claude-config/hooks/cause_gate.py"
 )
 
+# timeout が無い環境（Mac の標準など）では使わずに動かす（hook 自体の上限時間は残る）
+run_gate() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 10 python3 "$1"
+  else
+    python3 "$1"
+  fi
+}
+
+# decision: block の reason を取り出す（block でなければ空）
+block_reason() {
+  python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(0)
+if isinstance(d, dict) and d.get("decision") == "block":
+    print(d.get("reason") or "（Stop のゲートが理由なしで止めた）")
+'
+}
+
 reasons=()
 for g in "${gates[@]}"; do
   [ -f "$g" ] || continue
   errf="$(mktemp)"
-  out="$(printf '%s' "$input" | timeout 10 python3 "$g" 2>"$errf")"
+  out="$(printf '%s' "$input" | run_gate "$g" 2>"$errf")"
   rc=$?
   if [ "$rc" = 2 ]; then
     r="$(cat "$errf")"
-    [ -n "$r" ] && reasons+=("$r")
+    [ -n "$r" ] || r="（$(basename "$g") が終了コード 2 で止めた。理由は出力されていない）"
+    reasons+=("$r")
   elif [ "$rc" = 0 ] && [ -n "$out" ]; then
-    r="$(printf '%s' "$out" | jq -r 'select(.decision == "block") | .reason // ""' 2>/dev/null)"
+    r="$(printf '%s' "$out" | block_reason)"
     [ -n "$r" ] && reasons+=("$r")
   fi
   rm -f "$errf"
@@ -33,7 +58,8 @@ done
 
 if [ "${#reasons[@]}" -gt 0 ]; then
   # Claude は作業を続けるので、状態は working のまま（agent-state-hook は呼ばない）
-  printf '%s\n\n' "${reasons[@]}" | jq -Rs '{decision: "block", reason: sub("\n+$"; "")}'
+  printf '%s\n\n' "${reasons[@]}" |
+    python3 -c 'import json, sys; print(json.dumps({"decision": "block", "reason": sys.stdin.read().rstrip("\n")}, ensure_ascii=False))'
   exit 0
 fi
 

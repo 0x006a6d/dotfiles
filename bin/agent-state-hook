@@ -9,10 +9,14 @@
 #   UserPromptSubmit / PreToolUse / PostToolUse -> working
 #   PermissionRequest                           -> blocked
 #   SessionEnd                                  -> ファイルを消す
-# サブエージェント（agent_id 付き）の hook は親の状態を上書きしない。ただし
-#   PermissionRequest                    -> blocked（承認画面は親のペインに出る）
-#   PostToolUse（今の状態が blocked のとき）-> working（承認された）
-#   SubagentStop（サブエージェントが blocked/working にしていたとき）-> working（親はまだ動いている）
+# UserPromptSubmit では、受け取った時刻（prompt_ts）と指示の文の sha256（prompt_sha）を記録する。
+# agentctl はこれで、自分が送った指示が受け付けられたかを確かめる（定期タスクの指示と区別する）。
+#
+# サブエージェント（agent_id 付き）の hook は親の状態を上書きしない。ただし承認画面は親のペインに
+# 出るので、承認待ちのサブエージェントの ID を pending に持つ。
+#   PermissionRequest                          -> pending に足して blocked
+#   その ID の PreToolUse / PostToolUse / SubagentStop -> pending から外し、空なら working、残れば blocked
+# 親の UserPromptSubmit / Stop / SessionStart で pending は空に戻す。
 # tmux の外では何もしない。エージェントの動作を止めないよう、失敗しても常に 0 で終わる。
 
 kind="${1:-}"
@@ -30,6 +34,18 @@ now_ms() {
   esac
 }
 
+# 指示の文の sha256。前後の空白の違いで外れないよう、各行の前後の空白と前後の空行を除いてから取る
+# （agentctl も同じ形で取る）
+prompt_sha() {
+  local s
+  s="$(printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed -e '/./,$!d')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$s" | sha256sum | cut -d' ' -f1
+  else
+    printf '%s' "$s" | shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
 event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)"
 subagent="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
 session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
@@ -38,28 +54,38 @@ dir="$HOME/.cache/agent-state"
 mkdir -p "$dir" 2>/dev/null || exit 0
 file="$dir/${TMUX_PANE#%}.json"
 
-# 同じペインの hook が同時に動いても読み書きが混ざらないよう、1 つずつ行う
+# 同じペインの hook が同時に動いても読み書きが混ざらないよう、1 つずつ行う。
+# ロックが取れなければ、ほかの書き込みを上書きしないよう何もしない
 exec 9>"$file.lock" 2>/dev/null || exit 0
-command -v flock >/dev/null 2>&1 && flock -w 5 9
-
-cur_state="none"
-cur_by_sub=false
-prev_prompt=0
-if [ -f "$file" ]; then
-  cur_state="$(jq -r '.state // "none"' "$file" 2>/dev/null || echo none)"
-  cur_by_sub="$(jq -r '.by_subagent // false' "$file" 2>/dev/null || echo false)"
-  prev_prompt="$(jq -r '.prompt_ts // 0' "$file" 2>/dev/null || echo 0)"
+if command -v flock >/dev/null 2>&1; then
+  flock -w 5 9 || exit 0
 fi
 
+cur_state="none"
+pending='[]'
+prev_prompt=0
+prev_sha=""
+if [ -f "$file" ]; then
+  cur_state="$(jq -r '.state // "none"' "$file" 2>/dev/null || echo none)"
+  pending="$(jq -c '.pending // [] | if type == "array" then . else [] end' "$file" 2>/dev/null || echo '[]')"
+  prev_prompt="$(jq -r '.prompt_ts // 0' "$file" 2>/dev/null || echo 0)"
+  prev_sha="$(jq -r '.prompt_sha // ""' "$file" 2>/dev/null || echo "")"
+fi
+[ -n "$pending" ] || pending='[]'
+
+has_pending() { [ "$(printf '%s' "$pending" | jq --arg id "$1" 'index($id) != null' 2>/dev/null)" = true ]; }
+drop_pending() { pending="$(printf '%s' "$pending" | jq -c --arg id "$1" 'map(select(. != $id))')"; }
+after_drop() { if [ "$pending" = '[]' ]; then state=working; else state=blocked; fi; }
+
 state=""
-by_sub=false
-if [ "$event" = SubagentStop ]; then
-  # サブエージェントが終わっても親は作業を続けている（並列の別のサブエージェントもいる）ので working に戻す
-  if [ "$cur_by_sub" = true ]; then state=working; else exit 0; fi
-elif [ -n "$subagent" ]; then
+if [ -n "$subagent" ]; then
   case "$event" in
-    PermissionRequest) state=blocked; by_sub=true ;;
-    PostToolUse) [ "$cur_state" = blocked ] || exit 0; state=working; by_sub=true ;;
+    PermissionRequest)
+      has_pending "$subagent" || pending="$(printf '%s' "$pending" | jq -c --arg id "$subagent" '. + [$id]')"
+      state=blocked ;;
+    PreToolUse | PostToolUse | SubagentStop)
+      has_pending "$subagent" || exit 0
+      drop_pending "$subagent"; after_drop ;;
     *) exit 0 ;;
   esac
 else
@@ -67,9 +93,13 @@ else
   source="$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null)"
   [ "$event" = SessionStart ] && [ "$source" = compact ] && exit 0
   case "$event" in
-    SessionStart | Stop) state=idle ;;
-    UserPromptSubmit | PreToolUse | PostToolUse) state=working ;;
+    SessionStart | Stop) state=idle; pending='[]' ;;
+    UserPromptSubmit) state=working; pending='[]' ;;
+    PreToolUse | PostToolUse) if [ "$pending" = '[]' ]; then state=working; else state=blocked; fi ;;
     PermissionRequest) state=blocked ;;
+    SubagentStop)
+      # agent_id が無い SubagentStop は、どのサブエージェントか分からないので状態を変えない
+      exit 0 ;;
     SessionEnd) rm -f "$file"; exit 0 ;;
     *) exit 0 ;;
   esac
@@ -78,13 +108,22 @@ fi
 now="$(now_ms)"
 case "$prev_prompt" in '' | *[!0-9]*) prev_prompt=0 ;; esac
 prompt_ts="$prev_prompt"
-[ "$event" = UserPromptSubmit ] && [ -z "$subagent" ] && prompt_ts="$now"
+sha="$prev_sha"
+if [ "$event" = UserPromptSubmit ] && [ -z "$subagent" ]; then
+  prompt_ts="$now"
+  # Codex など、入力に指示の文が無いときは空にする（agentctl は時刻だけで判断する）
+  if printf '%s' "$input" | jq -e 'has("prompt")' >/dev/null 2>&1; then
+    sha="$(prompt_sha "$(printf '%s' "$input" | jq -r '.prompt')")"
+  else
+    sha=""
+  fi
+fi
 
 tmp="$(mktemp "$dir/.tmp.XXXXXX" 2>/dev/null)" || exit 0
 jq -n --arg kind "$kind" --arg state "$state" --arg event "$event" \
   --arg session "$session" --arg pane "$TMUX_PANE" \
-  --argjson ts "$now" --argjson prompt_ts "$prompt_ts" --argjson by_sub "$by_sub" \
-  '{agent:$kind, state:$state, event:$event, session_id:$session, pane:$pane, ts:$ts, prompt_ts:$prompt_ts, by_subagent:$by_sub}' \
+  --argjson ts "$now" --argjson prompt_ts "$prompt_ts" --arg sha "$sha" --argjson pending "$pending" \
+  '{agent:$kind, state:$state, event:$event, session_id:$session, pane:$pane, ts:$ts, prompt_ts:$prompt_ts, prompt_sha:$sha, pending:$pending}' \
   >"$tmp" 2>/dev/null && mv -f "$tmp" "$file"
 rm -f "$tmp" 2>/dev/null
 exit 0

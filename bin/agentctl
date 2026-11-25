@@ -63,14 +63,63 @@ state_of() {
   if [ -f "$f" ]; then jq -r '.state // "none"' "$f" 2>/dev/null || echo none; else echo none; fi
 }
 
-prompt_ts_of() {
+# 状態ファイルの 1 項目（無ければ第 3 引数）
+field_of() {
   local f
   f="$(state_file "$1")"
-  if [ -f "$f" ]; then jq -r '.prompt_ts // 0' "$f" 2>/dev/null || echo 0; else echo 0; fi
+  if [ -f "$f" ]; then jq -r --arg k "$2" --arg d "$3" '.[$k] // $d' "$f" 2>/dev/null || echo "$3"; else echo "$3"; fi
+}
+
+# 指示の文の sha256（agent-state-hook と同じ形: 各行の前後の空白と前後の空行を除く）
+prompt_sha() {
+  local s
+  s="$(printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed -e '/./,$!d')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$s" | sha256sum | cut -d' ' -f1
+  else
+    printf '%s' "$s" | shasum -a 256 | cut -d' ' -f1
+  fi
+}
+
+# 状態ファイルを hook と同じロックの中で書き換える。
+#   locked_update <ペイン> <条件の jq 式> <書き換えの jq 式> [jq の引数...]
+# 条件が真のときだけ書き換えて 0 を返す。ロックが取れない・条件が偽・失敗なら 1。
+locked_update() {
+  local pane="$1" cond="$2" upd="$3" f
+  shift 3
+  f="$(state_file "$pane")"
+  mkdir -p "$STATE_DIR"
+  (
+    exec 9>"$f.lock" || exit 1
+    if command -v flock >/dev/null 2>&1; then flock -w 5 9 || exit 1; fi
+    cur='null'
+    [ -f "$f" ] && cur="$(cat "$f" 2>/dev/null)"
+    [ -n "$cur" ] || cur='null'
+    [ "$(printf '%s' "$cur" | jq "$@" "$cond" 2>/dev/null)" = true ] || exit 1
+    tmp="$(mktemp "$STATE_DIR/.tmp.XXXXXX")" || exit 1
+    if printf '%s' "$cur" | jq "$@" "$upd" >"$tmp" 2>/dev/null; then
+      mv -f "$tmp" "$f"
+    else
+      rm -f "$tmp"; exit 1
+    fi
+  )
+}
+
+# 動いているのがエージェントか（終了してシェルに戻っていないか）
+# ネイティブ版の Claude は、Mac の tmux ではコマンド名がバージョン番号（2.1.332 等）になる
+agent_running() {
+  local pane="$1" kind cur
+  kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
+  cur="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null)" || return 1
+  case "$cur" in
+    claude | codex | node) return 0 ;;
+    [0-9]*.[0-9]*.[0-9]*) [ "$kind" = claude ] ;;
+    *) return 1 ;;
+  esac
 }
 
 # Esc の中断では hook が来ず、状態ファイルが working のまま残る。作業中は画面の下に
-# 「esc to interrupt」が出るので、working なのに画面の最後の 10 行にこれが無ければ、
+# 「esc to interrupt」が出るので、working なのに画面の最後の 10 行に「esc to」が無ければ、
 # 中断されたとみなして idle に書き直す（書き直したら 0 を返す）。
 #   Claude: 1 秒空けて 2 回続けて無いとき
 #   Codex : 文章を書き出している間はこの行を消すので、2 秒空けて 2 回続けて無く、
@@ -78,31 +127,28 @@ prompt_ts_of() {
 has_indicator() {
   printf '%s\n' "$1" |
     awk '{ buf[NR] = $0 } /[^[:space:]]/ { last = NR } END { for (i = 1; i <= last; i++) print buf[i] }' |
-    tail -n 10 | grep -qiF 'esc to interrupt'
+    tail -n 10 | grep -qiF 'esc to'
 }
 fix_interrupted() {
-  local pane="$1" kind f tmp s1 s2
+  local pane="$1" kind ts0 s1 s2 width
+  # 狭いペインでは画面下の文字が「esc to …」のように切れるので、esc to までで判定する。
+  # 幅 30 文字未満ではそれも切れうるので、中断の判定をしない（作業中のまま扱う）
+  width="$(tmux display-message -p -t "$pane" '#{pane_width}' 2>/dev/null)" || return 1
+  [ "${width:-0}" -ge 30 ] || return 1
   kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
+  # 画面を撮る前の状態の時刻。書き直すのは、その後に hook が何も書いていないときだけ
+  ts0="$(field_of "$pane" ts "")"
+  [ -n "$ts0" ] || return 1
   s1="$(tmux capture-pane -p -t "$pane" 2>/dev/null)" || return 1
   has_indicator "$s1" && return 1
   if [ "$kind" = codex ]; then sleep 2; else sleep 1; fi
   s2="$(tmux capture-pane -p -t "$pane" 2>/dev/null)" || return 1
   has_indicator "$s2" && return 1
   if [ "$kind" = codex ] && [ "$s1" != "$s2" ]; then return 1; fi
-  f="$(state_file "$pane")"
-  [ -f "$f" ] || return 1
-  # hook と同じロックで、まだ working のときだけ書き直す
-  (
-    exec 9>"$f.lock"
-    command -v flock >/dev/null 2>&1 && flock -w 5 9
-    [ "$(jq -r '.state // ""' "$f" 2>/dev/null)" = working ] || exit 1
-    tmp="$(mktemp "$STATE_DIR/.tmp.XXXXXX")" || exit 1
-    if jq --argjson ts "$(now_ms)" '.state = "idle" | .event = "agentctl-interrupted" | .ts = $ts | .by_subagent = false' "$f" >"$tmp"; then
-      mv -f "$tmp" "$f"
-    else
-      rm -f "$tmp"; exit 1
-    fi
-  )
+  locked_update "$pane" \
+    '. != null and .state == "working" and ((.ts // "") | tostring) == $ts0' \
+    '.state = "idle" | .event = "agentctl-interrupted" | .ts = $now | .pending = []' \
+    --arg ts0 "$ts0" --argjson now "$(now_ms)"
 }
 
 # 隣にペインを分けて ID を返す
@@ -151,11 +197,11 @@ cmd_start() {
     st="$(state_of "$pane")"
     if [ "$st" = none ] && [ "$kind" = codex ] &&
       tmux capture-pane -p -t "$pane" | grep -qF 'Ask Codex to do anything'; then
-      mkdir -p "$STATE_DIR"
-      jq -n --arg pane "$pane" --argjson ts "$(now_ms)" \
-        '{agent:"codex", state:"idle", event:"agentctl-start", session_id:"", pane:$pane, ts:$ts, prompt_ts:0}' \
-        >"$(state_file "$pane")"
-      st=idle
+      # hook がまだ何も書いていないときだけ、ロックの中で仮の idle を置く
+      locked_update "$pane" '. == null' \
+        '{agent:"codex", state:"idle", event:"agentctl-start", session_id:"", pane:$pane, ts:$now, prompt_ts:0, prompt_sha:"", pending:[]}' \
+        --arg pane "$pane" --argjson now "$(now_ms)" || true
+      st="$(state_of "$pane")"
     fi
     if [ "$st" = idle ]; then
       echo "$name $pane $kind idle"
@@ -200,6 +246,15 @@ cmd_prompt() {
   pane="$(need_pane "$name")"
   kind="$(tmux show-options -p -v -t "$pane" @agent_kind 2>/dev/null || true)"
   [ "$kind" != shell ] || die "'$name' はシェルです。agentctl run を使ってください"
+  # 同じペインへの送信は 1 つずつ。受け付けを確かめるか 10 秒たつまで送信ロックを持つ
+  local sendlock
+  sendlock="$(state_file "$pane").send.lock"
+  mkdir -p "$STATE_DIR"
+  exec 8>"$sendlock" || die "送信ロックを作れません: $sendlock"
+  if command -v flock >/dev/null 2>&1; then
+    flock -n 8 || die "'$name' には別の agentctl prompt が送信中です。終わってから送ってください"
+  fi
+
   st="$(state_of "$pane")"
   if [ "$st" = working ] && fix_interrupted "$pane"; then st=idle; fi
   # 入力待ち（idle）と hook で確かめられたときだけ送る。
@@ -212,17 +267,12 @@ cmd_prompt() {
   esac
   # 状態ファイルが idle のままエージェントが終了していると、ペインはシェルに戻っていて
   # 指示がコマンドとして実行されてしまう。送る直前に、動いているのがエージェントか確かめる。
-  local cur
-  cur="$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null || true)"
-  # ネイティブ版の Claude は、Mac の tmux ではコマンド名がバージョン番号（2.1.332 等）になる
-  case "$cur" in
-    claude | codex | node) ;;
-    [0-9]*.[0-9]*.[0-9]*) [ "$kind" = claude ] || die "'$name' のペインで動いているのは '$cur' で、エージェントではありません（終了した可能性）。送りません" ;;
-    *) die "'$name' のペインで動いているのは '$cur' で、エージェントではありません（終了した可能性）。送りません" ;;
-  esac
+  agent_running "$pane" ||
+    die "'$name' のペインで動いているのは '$(tmux display-message -p -t "$pane" '#{pane_current_command}' 2>/dev/null)' で、エージェントではありません（終了した可能性）。送りません"
 
-  local start buf="agentctl-$$"
+  local start buf="agentctl-$$" mysha
   start="$(now_ms)"
+  mysha="$(prompt_sha "$text")"
   # 貼り付け（アプリが bracketed paste を有効にしていれば -p で囲む）してから Enter。
   # バッファは tmux 全体で共有なので、呼び出しごとに別の名前にする
   printf '%s' "$text" | tmux load-buffer -b "$buf" -
@@ -232,26 +282,34 @@ cmd_prompt() {
   fi
   sleep 0.3
   tmux send-keys -t "$pane" Enter
-  [ "$wait" = 1 ] || { echo "sent"; return 0; }
 
   local deadline=""
   [ -n "$timeout" ] && deadline=$(( start + timeout ))
-  # 送った指示で UserPromptSubmit が来たことを 10 秒以内に確かめる
-  local accepted=0 gate=$(( start + 10000 ))
+  # 送った指示で UserPromptSubmit が来たことを 10 秒以内に確かめる（--wait なしでもここまでは待つ）。
+  # 時刻が送った後で、指示の文の sha256 が送った文と同じなら受け付け（定期タスクなどの指示と区別する）。
+  # Codex など hook の入力に指示の文が無いとき（prompt_sha が空）は時刻だけで判断する。
+  local accepted=0 gate=$(( start + 10000 )) t sha
   while :; do
-    local t
     t="$(now_ms)"
     if [ -n "$deadline" ] && [ "$t" -ge "$deadline" ]; then
       die "時間切れ（state=$(state_of "$pane")）。送った指示が届いていないとは限りません。read で確認してください"
     fi
+    # 待っている間にペインが閉じられた・エージェントが終了した・状態ファイルが消えたら止める
+    tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 ||
+      die "'$name' のペインがなくなりました"
+    agent_running "$pane" || die "'$name' のエージェントが終了しました"
+    st="$(state_of "$pane")"
+    [ "$st" != none ] || die "'$name' の状態ファイルがなくなりました（エージェントが終了した可能性）"
     if [ "$accepted" = 0 ]; then
-      if [ "$(prompt_ts_of "$pane")" -ge "$start" ]; then
+      sha="$(field_of "$pane" prompt_sha "")"
+      if [ "$(field_of "$pane" prompt_ts 0)" -ge "$start" ] && { [ -z "$sha" ] || [ "$sha" = "$mysha" ]; }; then
         accepted=1
+        exec 8>&-
+        [ "$wait" = 1 ] || { echo "sent"; return 0; }
       elif [ "$t" -ge "$gate" ]; then
         die "10 秒以内に作業を始めませんでした（stalled）。read で確認してください"
       fi
     else
-      st="$(state_of "$pane")"
       case "$st" in
         idle) echo "idle"; return 0 ;;
         blocked) echo "blocked"; die "'$name' が承認待ち（blocked）で止まりました。agentctl read $name で確認してください" ;;
