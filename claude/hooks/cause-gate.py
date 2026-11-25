@@ -8,6 +8,8 @@
 #   - 「mode: 修正」なら「原因:」と「直す1点:」と「card:」の行が空でなく、card のノートに今日の日付の
 #     「- YYYY-MM-DD claude:」コメントで「原因」を含む行がある
 #   - 「mode: 診断」なら「診断:」の行が空でない（設定しなければ動作が変わらない切り替えだけを足すとき）
+#   - 「mode: 新規」なら「作るもの:」と「card:」の行が空でなく、card のノートが実在し、書き込み先がまだ存在しない
+#     （新しいファイルを作るとき。既存のファイルの書き換えは「修正」でしか通らない）
 # 止めるときは exit 2 と理由（stderr）を返す。コード以外のファイルと読み取りだけのコマンドは通す。
 import json, os, re, sys, time, datetime
 
@@ -26,7 +28,11 @@ def block_with(msg, gate):
                      "  （カードに今日の claude: コメントで原因を書いておく）\n"
                      "  診断用の切り替えだけなら次の 2 行:\n"
                      "  mode: 診断\n"
-                     "  診断: <何を確かめるか>\n")
+                     "  診断: <何を確かめるか>\n"
+                     "  まだ存在しないファイルを作るだけなら次の 3 行:\n"
+                     "  mode: 新規\n"
+                     "  card: <カードのパス>\n"
+                     "  作るもの: <何を作るか>\n")
     sys.exit(2)
 
 
@@ -91,8 +97,22 @@ def main():
         if not field("診断"):
             block("mode: 診断 なのに「診断:」が空。")
         sys.exit(0)
+    if mode == "新規":
+        for k in ("作るもの", "card"):
+            if not field(k):
+                block("「" + k + ":」が空。")
+        card = os.path.expanduser(field("card"))
+        if not os.path.isfile(card):
+            block("card のノートが見つからない: " + card)
+        base = d.get("cwd") or os.getcwd()
+        for p in t:
+            if p.startswith("("):     # 書き込み先のパスが分からないものは、新規かどうかを確かめられない
+                block("書き込み先のパスが分からないので mode: 新規 では通さない。")
+            if os.path.lexists(os.path.join(base, os.path.expanduser(p))):
+                block("書き込み先がすでに存在する（既存の書き換えは mode: 修正）: " + p)
+        sys.exit(0)
     if mode != "修正":
-        block("mode が「修正」か「診断」になっていない。")
+        block("mode が「修正」「診断」「新規」のどれにもなっていない。")
     for k in ("原因", "直す1点", "card"):
         if not field(k):
             block("「" + k + ":」が空。")
