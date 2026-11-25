@@ -4,7 +4,7 @@
   },
   "model": "opus",
   "hooks": {
-        "SubagentStop": [
+    "SubagentStop": [
       {
         "hooks": [
           {
@@ -126,17 +126,6 @@
         ]
       }
     ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$HOME/dotfiles/bin/claude-stop-chain\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
     "UserPromptSubmit": [
       {
         "hooks": [
@@ -153,6 +142,17 @@
             "type": "command",
             "command": "\"$HOME/dotfiles/bin/agent-state-hook\" claude",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$HOME/claude-config/hooks/stop_chain.sh\"",
+            "timeout": 30
           }
         ]
       }
